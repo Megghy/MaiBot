@@ -376,56 +376,6 @@ Action: 调用 `found_answer(answer="昨天张三提到了GitHub", source="memor
 """,
         name="memory_retrieval_react_final_prompt",
     )
-    """解析ReAct Agent的响应
-    
-    Args:
-        response: LLM返回的响应
-        
-    Returns:
-        Dict[str, Any]: 解析后的动作信息，如果解析失败返回None
-        格式: {"thought": str, "actions": List[Dict[str, Any]]}
-        每个action格式: {"action_type": str, "action_params": dict}
-    """
-    try:
-        # 尝试提取JSON（可能包含在```json代码块中）
-        json_pattern = r"```json\s*(.*?)\s*```"
-        matches = re.findall(json_pattern, response, re.DOTALL)
-
-        if matches:
-            json_str = matches[0]
-        else:
-            # 尝试直接解析整个响应
-            json_str = response.strip()
-
-        # 修复可能的JSON错误
-        repaired_json = repair_json(json_str)
-
-        # 解析JSON
-        action_info = json.loads(repaired_json)
-
-        if not isinstance(action_info, dict):
-            logger.warning(f"解析的JSON不是对象格式: {action_info}")
-            return None
-
-        # 确保actions字段存在且为列表
-        if "actions" not in action_info:
-            logger.warning(f"响应中缺少actions字段: {action_info}")
-            return None
-
-        if not isinstance(action_info["actions"], list):
-            logger.warning(f"actions字段不是数组格式: {action_info['actions']}")
-            return None
-
-        # 确保actions不为空
-        if len(action_info["actions"]) == 0:
-            logger.warning("actions数组为空")
-            return None
-
-        return action_info
-
-    except Exception as e:
-        logger.error(f"解析ReAct响应失败: {e}, 响应内容: {response[:200]}...")
-        return None
 
 
 async def _retrieve_concepts_with_jargon(concepts: List[str], chat_id: str) -> str:
