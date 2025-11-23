@@ -51,6 +51,22 @@ def _build_fallback_question(sender: str, target_message: str) -> Optional[str]:
     return f"{sender} 提到的“{core}”指的具体事件或背景是什么？"
 
 
+QUESTION_HINT_REGEX = re.compile(r"[？?]|谁|什么|啥|哪|哪里|哪儿|什么时候|何时|为何|为什么|咋|怎么|如何|多少|第几")
+
+
+def _should_use_fallback_question(target_message: str, *, has_recent_query_history: bool, min_length: int = 6) -> bool:
+    """基于启发式判断是否需要触发fallback问题"""
+
+    if has_recent_query_history:
+        return False
+
+    text = (target_message or "").strip()
+    if len(text) < min_length:
+        return False
+
+    return bool(QUESTION_HINT_REGEX.search(text))
+
+
 async def _record_question_generation_trace(
     chat_stream,
     question_prompt: str,
@@ -430,17 +446,17 @@ def init_memory_retrieval_prompt():
 
 当前 {sender} 说: {target_message}
 
-任务: 判断是否需要回忆历史信息来回复, 并给出需要检索的关键词与问题.
+任务: 判断是否需要回忆历史信息来回复, 并给出需要检索的关键词与问题。
 
 操作步骤:
 1. 先根据上下文拆分出角色/事件/时间/地点/术语等可能缺失的信息.
 2. 如果这些信息会明显提升回答质量, 记录相应的概念关键词.
-3. 汇总出最关键的 1~3 个检索问题 (按重要度降序). 若确实不需要检索, 返回空数组.
+3. 只有在确实缺信息、且问题中存在明确的疑问信号/需要补充的点时, 才汇总 1~3 个检索问题 (按重要度降序). 若无需检索, 直接返回空数组。
 
 编写问题时请注意:
 - 聊天里若出现 "上次", "那个ta", "之前说" 等模糊指代, 需要展开成可检索的问题.
 - 如果 recent_query_history 已有部分答案, 但你还需更多细节, 可以在问题里说明想补充的方向.
-- 先确保真的无法用现有信息回复, 再提出检索.
+- 先确保真的无法用现有信息回复, 再提出检索; 没有疑问词、上下文足够时, 不要生成检索问题。
 
 输出 JSON, 且只输出 JSON:
 {{
@@ -1349,9 +1365,9 @@ async def build_memory_retrieval_prompt(
         chat_id = chat_stream.stream_id
 
         # 获取最近查询历史（最近1小时内的查询）
-        recent_query_history = _get_recent_query_history(chat_id, time_window_seconds=300.0)
-        if not recent_query_history:
-            recent_query_history = "最近没有查询记录。"
+        recent_query_history_raw = _get_recent_query_history(chat_id, time_window_seconds=300.0)
+        has_recent_query_history = bool(recent_query_history_raw)
+        recent_query_history = recent_query_history_raw or "最近没有查询记录。"
 
         participant_hints = _build_participant_hints(chat_id)
 
@@ -1405,10 +1421,13 @@ async def build_memory_retrieval_prompt(
         cached_memories = _get_cached_memories(chat_id, time_window_seconds=300.0)
 
         if not questions:
-            fallback = _build_fallback_question(sender, target)
-            if fallback:
-                logger.info("问题列表为空，使用自动回退问题")
-                questions = [fallback]
+            if _should_use_fallback_question(target, has_recent_query_history=has_recent_query_history):
+                fallback = _build_fallback_question(sender, target)
+                if fallback:
+                    logger.info("问题列表为空，使用自动回退问题")
+                    questions = [fallback]
+            else:
+                logger.info("问题列表为空，且启发式判断无需触发回退问题")
 
         await _record_question_generation_trace(
             chat_stream,
