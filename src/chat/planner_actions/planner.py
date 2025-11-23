@@ -1,4 +1,3 @@
-import json
 import time
 import traceback
 import random
@@ -6,8 +5,8 @@ import re
 from typing import Dict, Optional, Tuple, List, TYPE_CHECKING, Union
 from rich.traceback import install
 from datetime import datetime
-from json_repair import repair_json
 from src.llm_models.utils_model import LLMRequest
+from src.llm_models.payload_content.tool_option import ToolParamType, ToolCall
 from src.config.config import global_config, model_config
 from src.common.logger import get_logger
 from src.common.data_models.info_data_model import ActionPlannerInfo
@@ -36,95 +35,55 @@ def init_prompt():
         """
 {time_block}
 {name_block}
-你的兴趣是：{interest}
-{chat_context_description}，以下是具体的聊天内容
+你的兴趣是: {interest}
+{chat_context_description}, 以下是具体的聊天内容
 **聊天内容**
 {chat_content_block}
 
-**可选的action**
-reply
-动作描述：
-1.你可以选择呼叫了你的名字，但是你没有做出回应的消息进行回复
-2.你可以自然的顺着正在进行的聊天内容进行回复或自然的提出一个问题
-3.不要回复你自己发送的消息
-4.不要单独对表情包进行回复
-{{"action":"reply", "target_message_id":"消息id(m+数字)", "reason":"原因"}}
-
-no_reply
-动作描述：
-保持沉默，不回复直到有新消息
-控制聊天频率，不要太过频繁的发言
-{{"action":"no_reply"}}
-
-{no_reply_until_call_block}
-
-{action_options_text}
-
-
-**你之前的action执行和思考记录**
+**Action Records**
 {actions_before_now_block}
 
-请选择**可选的**且符合使用条件的action，并说明触发action的消息id(消息id格式:m+数字)
-不要回复你自己发送的消息
-先输出你的简短的选择思考理由，再输出你选择的action，理由不要分点，精简。
-**动作选择要求**
-请你根据聊天内容,用户的最新消息和以下标准选择合适的动作:
+请选择一个合适的 action.
+首先, 思考你的选择理由, 然后使用 tool calls 来执行 action.
+**Action Selection Requirements**
+请根据聊天内容, 用户的最新消息和以下标准选择合适的 action:
 {plan_style}
 {moderation_prompt}
 
-请选择所有符合使用要求的action，动作用json格式输出，用```json包裹，如果输出多个json，每个json都要单独一行放在同一个```json代码块内，你可以重复使用同一个动作或不同动作:
-**示例**
-// 理由文本（简短）
-```json
-{{"action":"动作名", "target_message_id":"m123", "reason":"原因"}}
-{{"action":"动作名", "target_message_id":"m456", "reason":"原因"}}
-```""",
+请使用 Tool Calls 来执行 actions. 你可以同时调用多个 tools.
+""",
         "planner_prompt",
     )
 
     Prompt(
         """{time_block}
 {name_block}
-{chat_context_description}，以下是具体的聊天内容
+{chat_context_description}, 以下是具体的聊天内容
 **聊天内容**
 {chat_content_block}
 
-**可选的action**
-no_reply
-动作描述：
-没有合适的可以使用的动作，不使用action
-{{"action":"no_reply"}}
-
-{action_options_text}
-
-**你之前的action执行和思考记录**
+**Action Records**
 {actions_before_now_block}
 
-请选择**可选的**且符合使用条件的action，并说明触发action的消息id(消息id格式:m+数字)
-先输出你的简短的选择思考理由，再输出你选择的action，理由不要分点，精简。
-**动作选择要求**
-请你根据聊天内容,用户的最新消息和以下标准选择合适的动作:
-1.思考**所有**的可用的action中的**每个动作**是否符合当下条件，如果动作使用条件符合聊天内容就使用
-2.如果相同的内容已经被执行，请不要重复执行
+请选择一个合适的 action.
+首先, 思考你的选择理由, 然后使用 tool calls 来执行 action.
+**Action Selection Requirements**
+请根据聊天内容, 用户的最新消息和以下标准选择合适的 action:
+1. 思考**所有**的可用的 action 中的**每个动作**是否符合当下条件, 如果动作使用条件符合聊天内容就使用
+2. 如果相同的内容已经被执行, 请不要重复执行
 {moderation_prompt}
 
-请选择所有符合使用要求的action，动作用json格式输出，用```json包裹，如果输出多个json，每个json都要单独一行放在同一个```json代码块内，你可以重复使用同一个动作或不同动作:
-**示例**
-// 理由文本（简短）
-```json
-{{"action":"动作名", "target_message_id":"m123", "reason":"原因"}}
-{{"action":"动作名", "target_message_id":"m456", "reason":"原因"}}
-```""",
+请使用 Tool Calls 来执行 actions. 你可以同时调用多个 tools.
+""",
         "planner_prompt_mentioned",
     )
 
     Prompt(
         """
 {action_name}
-动作描述：{action_description}
-使用条件{parallel_text}：
+动作描述: {action_description}
+使用条件 {parallel_text}:
 {action_require}
-{{"action":"{action_name}",{action_parameters}, "target_message_id":"消息id(m+数字)", "reason":"原因"}}
 """,
         "action_prompt",
     )
@@ -202,56 +161,120 @@ class ActionPlanner:
 
         return re.sub(pattern, _replace, text)
 
-    def _parse_single_action(
+    def _convert_actions_to_tools(self, actions: Dict[str, ActionInfo]) -> List[Dict[str, Any]]:
+        """Convert actions to tool definitions"""
+        tools = []
+        
+        # Add standard actions
+        # reply
+        tools.append({
+            "name": "reply",
+            "description": "回复一条消息. 当你想回应用户或聊天上下文时使用此项.",
+            "parameters": [
+                ("target_message_id", ToolParamType.STRING, "你回复的消息的ID (m+数字)", True, None),
+                ("reason", ToolParamType.STRING, "回复的原因", True, None)
+            ]
+        })
+        
+        # no_reply
+        tools.append({
+            "name": "no_reply",
+            "description": "不回复. 当你想保持沉默时使用此项.",
+            "parameters": [
+                ("reason", ToolParamType.STRING, "不回复的原因", True, None)
+            ]
+        })
+
+        # wait_time
+        tools.append({
+            "name": "wait_time",
+            "description": "在下一个动作之前等待一段时间.",
+            "parameters": [
+                ("duration", ToolParamType.INTEGER, "等待的持续时间 (秒)", True, None),
+                ("reason", ToolParamType.STRING, "等待的原因", True, None)
+            ]
+        })
+
+        # no_reply_until_call
+        tools.append({
+            "name": "no_reply_until_call",
+            "description": "保持沉默直到被指名道姓地呼叫.",
+            "parameters": [
+                ("reason", ToolParamType.STRING, "进入此模式的原因", True, None)
+            ]
+        })
+
+        for action_name, action_info in actions.items():
+            if action_name in ["reply", "no_reply", "wait_time", "no_reply_until_call"]:
+                continue
+                
+            params = []
+            if action_info.action_parameters:
+                for param_name, param_desc in action_info.action_parameters.items():
+                    params.append((param_name, ToolParamType.STRING, param_desc, True, None))
+            
+            # Add common parameters for all actions
+            params.append(("target_message_id", ToolParamType.STRING, "触发此动作的消息ID", False, None))
+            params.append(("reason", ToolParamType.STRING, "使用此动作的原因", True, None))
+
+            tools.append({
+                "name": action_name,
+                "description": action_info.description,
+                "parameters": params
+            })
+            
+        return tools
+
+    def _parse_single_tool_call(
         self,
-        action_json: dict,
+        tool_call: ToolCall,
         message_id_list: List[Tuple[str, "DatabaseMessages"]],
         current_available_actions: List[Tuple[str, ActionInfo]],
         extracted_reasoning: str = "",
     ) -> List[ActionPlannerInfo]:
-        """解析单个action JSON并返回ActionPlannerInfo列表"""
+        """解析单个ToolCall并返回ActionPlannerInfo列表"""
         action_planner_infos = []
+        action_type = tool_call.func_name
+        action_args = tool_call.args or {}
 
         try:
-            action = action_json.get("action", "no_reply")
-            original_reasoning = action_json.get("reason", "未提供原因")
+            original_reasoning = action_args.get("reason", "No reason provided")
             reasoning = self._replace_message_ids_with_text(original_reasoning, message_id_list)
             if reasoning is None:
                 reasoning = original_reasoning
-            action_data = {key: value for key, value in action_json.items() if key not in ["action", "reason"]}
-            # 非no_reply动作需要target_message_id
-            target_message = None
 
-            if target_message_id := action_json.get("target_message_id"):
-                # 根据target_message_id查找原始消息
+            target_message_id = action_args.get("target_message_id")
+            
+            # 清理args中的通用参数
+            action_data = {k: v for k, v in action_args.items() if k not in ["target_message_id", "reason"]}
+
+            target_message = None
+            if target_message_id:
                 target_message = self.find_message_by_id(target_message_id, message_id_list)
                 if target_message is None:
                     logger.warning(f"{self.log_prefix}无法找到target_message_id '{target_message_id}' 对应的消息")
-                    # 选择最新消息作为target_message
                     target_message = message_id_list[-1][1]
             else:
                 target_message = message_id_list[-1][1]
-                logger.debug(f"{self.log_prefix}动作'{action}'缺少target_message_id，使用最新消息作为target_message")
 
             # 验证action是否可用
             available_action_names = [action_name for action_name, _ in current_available_actions]
             internal_action_names = ["no_reply", "reply", "wait_time", "no_reply_until_call"]
 
-            if action not in internal_action_names and action not in available_action_names:
+            if action_type not in internal_action_names and action_type not in available_action_names:
                 logger.warning(
-                    f"{self.log_prefix}LLM 返回了当前不可用或无效的动作: '{action}' (可用: {available_action_names})，将强制使用 'no_reply'"
+                    f"{self.log_prefix}LLM 返回了当前不可用或无效的动作: '{action_type}' (可用: {available_action_names})，将强制使用 'no_reply'"
                 )
                 reasoning = (
-                    f"LLM 返回了当前不可用的动作 '{action}' (可用: {available_action_names})。原始理由: {reasoning}"
+                    f"LLM 返回了当前不可用的动作 '{action_type}' (可用: {available_action_names})。原始理由: {reasoning}"
                 )
-                action = "no_reply"
+                action_type = "no_reply"
 
             # 创建ActionPlannerInfo对象
-            # 将列表转换为字典格式
             available_actions_dict = dict(current_available_actions)
             action_planner_infos.append(
                 ActionPlannerInfo(
-                    action_type=action,
+                    action_type=action_type,
                     reasoning=reasoning,
                     action_data=action_data,
                     action_message=target_message,
@@ -261,13 +284,12 @@ class ActionPlanner:
             )
 
         except Exception as e:
-            logger.error(f"{self.log_prefix}解析单个action时出错: {e}")
-            # 将列表转换为字典格式
+            logger.error(f"{self.log_prefix}解析单个ToolCall时出错: {e}")
             available_actions_dict = dict(current_available_actions)
             action_planner_infos.append(
                 ActionPlannerInfo(
                     action_type="no_reply",
-                    reasoning=f"解析单个action时出错: {e}",
+                    reasoning=f"解析单个ToolCall时出错: {e}",
                     action_data={},
                     action_message=None,
                     available_actions=available_actions_dict,
@@ -609,16 +631,27 @@ class ActionPlanner:
         """执行主规划器"""
         llm_content = None
         actions: List[ActionPlannerInfo] = []
+        reasoning_text = ""
 
         try:
+            # Build tools from filtered actions
+            tools = self._convert_actions_to_tools(filtered_actions)
+
             # 调用LLM
-            llm_content, (reasoning_content, _, _) = await self.planner_llm.generate_response_async(prompt=prompt)
+            llm_content, (reasoning_content, _, tool_calls) = await self.planner_llm.generate_response_async(
+                prompt=prompt,
+                tools=tools
+            )
+            
+            reasoning_text = reasoning_content or llm_content or ""
 
             if global_config.debug.show_planner_prompt:
                 logger.info(f"{self.log_prefix}规划器原始提示词: {prompt}")
                 logger.info(f"{self.log_prefix}规划器原始响应: {llm_content}")
                 if reasoning_content:
                     logger.info(f"{self.log_prefix}规划器推理: {reasoning_content}")
+                if tool_calls:
+                     logger.info(f"{self.log_prefix}规划器工具调用: {[t.func_name for t in tool_calls]}")
             else:
                 logger.debug(f"{self.log_prefix}规划器原始提示词: {prompt}")
                 logger.debug(f"{self.log_prefix}规划器原始响应: {llm_content}")
@@ -637,35 +670,27 @@ class ActionPlanner:
                 )
             ]
 
-        # 解析LLM响应
-        extracted_reasoning = ""
-        if llm_content:
+        # Parse Tool Calls
+        if tool_calls:
             try:
-                json_objects, extracted_reasoning = self._extract_json_from_markdown(llm_content)
-                extracted_reasoning = self._replace_message_ids_with_text(extracted_reasoning, message_id_list) or ""
-                if json_objects:
-                    logger.debug(f"{self.log_prefix}从响应中提取到{len(json_objects)}个JSON对象")
-                    filtered_actions_list = list(filtered_actions.items())
-                    for json_obj in json_objects:
-                        actions.extend(
-                            self._parse_single_action(
-                                json_obj, message_id_list, filtered_actions_list, extracted_reasoning
-                            )
+                logger.debug(f"{self.log_prefix}从响应中提取到{len(tool_calls)}个工具调用")
+                filtered_actions_list = list(filtered_actions.items())
+                for tool_call in tool_calls:
+                    actions.extend(
+                        self._parse_single_tool_call(
+                            tool_call, message_id_list, filtered_actions_list, reasoning_text
                         )
-                else:
-                    # 尝试解析为直接的JSON
-                    logger.warning(f"{self.log_prefix}LLM没有返回可用动作: {llm_content}")
-                    extracted_reasoning = "LLM没有返回可用动作"
-                    actions = self._create_no_reply("LLM没有返回可用动作", available_actions)
-
+                    )
             except Exception as json_e:
-                logger.warning(f"{self.log_prefix}解析LLM响应JSON失败 {json_e}. LLM原始输出: '{llm_content}'")
-                extracted_reasoning = f"解析LLM响应JSON失败: {json_e}"
-                actions = self._create_no_reply(f"解析LLM响应JSON失败: {json_e}", available_actions)
-                traceback.print_exc()
+                 logger.warning(f"{self.log_prefix}解析LLM工具调用失败 {json_e}")
+                 traceback.print_exc()
+                 actions = self._create_no_reply(f"解析LLM工具调用失败: {json_e}", available_actions)
         else:
-            extracted_reasoning = "规划器没有获得LLM响应"
-            actions = self._create_no_reply("规划器没有获得LLM响应", available_actions)
+            logger.warning(f"{self.log_prefix}LLM没有返回工具调用: {llm_content}")
+            reason = "规划器没有返回有效的动作选择"
+            if llm_content:
+                 reason = f"规划器未选择动作，回复内容: {llm_content[:50]}..."
+            actions = self._create_no_reply(reason, available_actions)
 
         # 添加循环开始时间到所有非no_reply动作
         for action in actions:
@@ -674,7 +699,7 @@ class ActionPlanner:
 
         logger.debug(f"{self.log_prefix}规划器选择了{len(actions)}个动作: {' '.join([a.action_type for a in actions])}")
 
-        return extracted_reasoning, actions
+        return reasoning_text, actions
 
     def _create_no_reply(self, reasoning: str, available_actions: Dict[str, ActionInfo]) -> List[ActionPlannerInfo]:
         """创建no_reply"""
@@ -687,65 +712,6 @@ class ActionPlanner:
                 available_actions=available_actions,
             )
         ]
-
-    def _extract_json_from_markdown(self, content: str) -> Tuple[List[dict], str]:
-        # sourcery skip: for-append-to-extend
-        """从Markdown格式的内容中提取JSON对象和推理内容"""
-        json_objects = []
-        reasoning_content = ""
-
-        # 使用正则表达式查找```json包裹的JSON内容
-        json_pattern = r"```json\s*(.*?)\s*```"
-        markdown_matches = re.findall(json_pattern, content, re.DOTALL)
-
-        # 提取JSON之前的内容作为推理文本
-        first_json_pos = len(content)
-        if markdown_matches:
-            # 找到第一个```json的位置
-            first_json_pos = content.find("```json")
-            if first_json_pos > 0:
-                reasoning_content = content[:first_json_pos].strip()
-                # 清理推理内容中的注释标记
-                reasoning_content = re.sub(r"^//\s*", "", reasoning_content, flags=re.MULTILINE)
-                reasoning_content = reasoning_content.strip()
-
-        # 处理```json包裹的JSON
-        for match in markdown_matches:
-            try:
-                # 清理可能的注释和格式问题
-                json_str = re.sub(r"//.*?\n", "\n", match)  # 移除单行注释
-                json_str = re.sub(r"/\*.*?\*/", "", json_str, flags=re.DOTALL)  # 移除多行注释
-                if json_str := json_str.strip():
-                    # 尝试按行分割，每行可能是一个JSON对象
-                    lines = [line.strip() for line in json_str.split("\n") if line.strip()]
-                    for line in lines:
-                        try:
-                            # 尝试解析每一行作为独立的JSON对象
-                            json_obj = json.loads(repair_json(line))
-                            if isinstance(json_obj, dict):
-                                json_objects.append(json_obj)
-                            elif isinstance(json_obj, list):
-                                for item in json_obj:
-                                    if isinstance(item, dict):
-                                        json_objects.append(item)
-                        except json.JSONDecodeError:
-                            # 如果单行解析失败，尝试将整个块作为一个JSON对象或数组
-                            pass
-
-                    # 如果按行解析没有成功，尝试将整个块作为一个JSON对象或数组
-                    if not json_objects:
-                        json_obj = json.loads(repair_json(json_str))
-                        if isinstance(json_obj, dict):
-                            json_objects.append(json_obj)
-                        elif isinstance(json_obj, list):
-                            for item in json_obj:
-                                if isinstance(item, dict):
-                                    json_objects.append(item)
-            except Exception as e:
-                logger.warning(f"解析JSON块失败: {e}, 块内容: {match[:100]}...")
-                continue
-
-        return json_objects, reasoning_content
 
 
 init_prompt()

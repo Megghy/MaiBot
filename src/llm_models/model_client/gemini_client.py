@@ -662,7 +662,7 @@ class GeminiClient(BaseClient):
                 resp, usage_record = async_response_parser(req_task.result())
         except (ClientError, ServerError) as e:
             # 重封装 ClientError 和 ServerError 为 RespNotOkException
-            raise RespNotOkException(e.code, e.message) from None
+            raise RespNotOkException(e.code, str(e)) from None
         except (
             UnknownFunctionCallArgumentError,
             UnsupportedFunctionError,
@@ -708,7 +708,7 @@ class GeminiClient(BaseClient):
             )
         except (ClientError, ServerError) as e:
             # 重封装ClientError和ServerError为RespNotOkException
-            raise RespNotOkException(e.code) from None
+            raise RespNotOkException(e.code, str(e)) from None
         except Exception as e:
             raise NetworkConnectionError() from e
 
@@ -779,7 +779,7 @@ class GeminiClient(BaseClient):
             resp, usage_record = _default_normal_response_parser(raw_response)
         except (ClientError, ServerError) as e:
             # 重封装ClientError和ServerError为RespNotOkException
-            raise RespNotOkException(e.code) from None
+            raise RespNotOkException(e.code, str(e)) from None
         except Exception as e:
             raise NetworkConnectionError() from e
 

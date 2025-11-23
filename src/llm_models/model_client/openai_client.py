@@ -587,7 +587,7 @@ class OpenaiClient(BaseClient):
             raise NetworkConnectionError() from e
         except APIStatusError as e:
             # 重封装APIError为RespNotOkException
-            raise RespNotOkException(e.status_code, e.message) from e
+            raise RespNotOkException(e.status_code, str(e)) from e
 
         if usage_record:
             resp.usage = UsageRecord(
@@ -629,7 +629,7 @@ class OpenaiClient(BaseClient):
             raise NetworkConnectionError() from e
         except APIStatusError as e:
             # 重封装APIError为RespNotOkException
-            raise RespNotOkException(e.status_code) from e
+            raise RespNotOkException(e.status_code, str(e)) from e
 
         response = APIResponse()
 
@@ -677,7 +677,7 @@ class OpenaiClient(BaseClient):
             raise NetworkConnectionError() from e
         except APIStatusError as e:
             # 重封装APIError为RespNotOkException
-            raise RespNotOkException(e.status_code) from e
+            raise RespNotOkException(e.status_code, str(e)) from e
         response = APIResponse()
         # 解析转录响应
         if hasattr(raw_response, "text"):

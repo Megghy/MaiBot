@@ -1,3 +1,4 @@
+import json
 import traceback
 import time
 import asyncio
@@ -293,6 +294,32 @@ class PrivateReplyer:
         mood_state = await mood_manager.get_mood_by_chat_id(self.chat_stream.stream_id).get_mood()
         return f"你现在的心情是：{mood_state}"
 
+    def _format_tool_results(self, tool_results: List[Dict[str, Any]]) -> str:
+        if not tool_results:
+            return ""
+
+        lines = []
+        for tool_result in tool_results:
+            tool_name = tool_result.get("tool_name", "unknown")
+            content = tool_result.get("content", "")
+            result_type = tool_result.get("type", "tool_result")
+
+            if isinstance(content, (dict, list)):
+                preview = json.dumps(content, ensure_ascii=False)
+            else:
+                preview = str(content)
+
+            preview = preview.strip()
+            if len(preview) > 200:
+                preview = f"{preview[:197]}..."
+
+            lines.append(f"- 【{tool_name}】({result_type}): {preview}")
+
+        if not lines:
+            return ""
+
+        return "以下是你通过工具获取到的实时信息：\n" + "\n".join(lines) + "\n以上信息可直接引用，不要额外总结。"
+
     async def build_tool_info(self, chat_history: str, sender: str, target: str, enable_tool: bool = True) -> str:
         """构建工具信息块
 
@@ -315,18 +342,10 @@ class PrivateReplyer:
             )
 
             if tool_results:
-                tool_info_str = "以下是你通过工具获取到的实时信息：\n"
-                for tool_result in tool_results:
-                    tool_name = tool_result.get("tool_name", "unknown")
-                    content = tool_result.get("content", "")
-                    result_type = tool_result.get("type", "tool_result")
-
-                    tool_info_str += f"- 【{tool_name}】{result_type}: {content}\n"
-
-                tool_info_str += "以上是你获取到的实时信息，请在回复时参考这些信息。"
-                logger.info(f"获取到 {len(tool_results)} 个工具结果")
-
-                return tool_info_str
+                formatted = self._format_tool_results(tool_results)
+                if formatted:
+                    logger.info(f"获取到 {len(tool_results)} 个工具结果")
+                    return formatted
             else:
                 logger.debug("未获取到任何工具结果")
                 return ""

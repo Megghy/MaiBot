@@ -342,24 +342,24 @@ class ActionModifier:
 
             # 构建基础判定提示词
             base_prompt = f"""
-你需要判断在当前聊天情况下，是否应该激活名为"{action_name}"的动作。
+你需要判断在当前聊天情况下, 是否应该激活名为"{action_name}"的动作.
 
-动作描述：{action_description}
+动作描述: {action_description}
 
-动作使用场景：
+动作使用场景:
 """
             for req in action_require:
                 base_prompt += f"- {req}\n"
 
             if custom_prompt:
-                base_prompt += f"\n额外判定条件：\n{custom_prompt}\n"
+                base_prompt += f"\n额外判定条件:\n{custom_prompt}\n"
 
             if chat_content:
-                base_prompt += f"\n当前聊天记录：\n{chat_content}\n"
+                base_prompt += f"\n当前聊天记录:\n{chat_content}\n"
 
             base_prompt += """
-请根据以上信息判断是否应该激活这个动作。
-只需要回答"是"或"否"，不要有其他内容。
+请根据以上信息判断是否应该激活这个动作.
+只需要回答"是" or "否" (Yes or No), 不要有其他内容.
 """
 
             # 调用LLM进行判定

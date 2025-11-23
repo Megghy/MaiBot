@@ -363,6 +363,50 @@ class Person:
             return memory_list
         return random.sample(memory_list, num)
 
+    def _calculate_relevance(self, memory_content: str, chat_content: str) -> float:
+        """计算记忆内容与聊天内容的关联度（基于Bigram）"""
+        if not memory_content or not chat_content:
+            return 0.0
+
+        # Bi-gram set generation
+        def get_bigrams(text):
+            return {text[i : i + 2] for i in range(len(text) - 1)}
+
+        mem_grams = get_bigrams(memory_content)
+        chat_grams = get_bigrams(chat_content)
+
+        if not mem_grams:
+            return 0.0
+
+        common = mem_grams & chat_grams
+        return len(common) / len(mem_grams)
+
+    def get_relevant_memories_by_category(self, category: str, chat_content: str, num: int = 1):
+        """获取与聊天内容最相关的记忆"""
+        memory_list = self.get_memory_list_by_category(category)
+        if not memory_list:
+            return []
+
+        if not chat_content:
+            return self.get_random_memory_by_category(category, num)
+
+        scored_memories = []
+        for memory in memory_list:
+            content = get_memory_content_from_memory(memory)
+            score = self._calculate_relevance(content, chat_content)
+            scored_memories.append((score, memory))
+
+        # 按分数降序排序
+        scored_memories.sort(key=lambda x: x[0], reverse=True)
+
+        # 如果最高分数为0，说明没有相关性，回退到随机
+        if scored_memories and scored_memories[0][0] == 0:
+             if len(memory_list) < num:
+                return memory_list
+             return random.sample(memory_list, num)
+
+        return [m[1] for m in scored_memories[:num]]
+
     def add_group_nick_name(self, group_id: str, group_nick_name: str):
         """
         添加或更新群昵称
@@ -518,10 +562,10 @@ class Person:
             category_list = extract_categories_from_response(response)
             if "none" not in category_list:
                 for category in category_list:
-                    random_memory = self.get_random_memory_by_category(category, 2)
-                    if random_memory:
+                    relevant_memory = self.get_relevant_memories_by_category(category, chat_content, 2)
+                    if relevant_memory:
                         random_memory_str = "\n".join(
-                            [get_memory_content_from_memory(memory) for memory in random_memory]
+                            [get_memory_content_from_memory(memory) for memory in relevant_memory]
                         )
                         points_text = f"有关 {category} 的内容：{random_memory_str}"
                         break
@@ -540,10 +584,10 @@ class Person:
             category_list = extract_categories_from_response(response)
             if "none" not in category_list:
                 for category in category_list:
-                    random_memory = self.get_random_memory_by_category(category, 3)
-                    if random_memory:
+                    relevant_memory = self.get_relevant_memories_by_category(category, info_type, 3)
+                    if relevant_memory:
                         random_memory_str = "\n".join(
-                            [get_memory_content_from_memory(memory) for memory in random_memory]
+                            [get_memory_content_from_memory(memory) for memory in relevant_memory]
                         )
                         points_text = f"有关 {category} 的内容：{random_memory_str}"
                         break
