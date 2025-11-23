@@ -6,7 +6,7 @@ import random
 import math
 
 from json_repair import repair_json
-from typing import Union, Optional, Callable
+from typing import Union, Optional, Callable, List
 
 from src.common.logger import get_logger
 from src.common.database.database import db
@@ -284,6 +284,19 @@ class Person:
         return person
 
     def __init__(self, platform: str = "", user_id: str = "", person_id: str = "", person_name: str = ""):
+        self.user_id = ""
+        self.platform = ""
+        self.person_id = ""
+        self.nickname = ""
+        self.person_name: Optional[str] = None
+        self.name_reason: Optional[str] = None
+        self.know_times = 0
+        self.know_since: Optional[float] = None
+        self.last_know: Optional[float] = None
+        self.memory_points: List[str] = []
+        self.group_nick_name: List[dict[str, str]] = []
+        self.is_known = False
+
         if platform == global_config.bot.platform and user_id == global_config.bot.qq_account:
             self.is_known = True
             self.person_id = get_person_id(platform, user_id)
@@ -291,19 +304,15 @@ class Person:
             self.platform = platform
             self.nickname = global_config.bot.nickname
             self.person_name = global_config.bot.nickname
-            self.group_nick_name: list[dict[str, str]] = []
+            logger.debug("初始化 Person: 机器人自身")
             return
-
-        self.user_id = ""
-        self.platform = ""
 
         if person_id:
             self.person_id = person_id
         elif person_name:
             self.person_id = get_person_id_by_person_name(person_name)
             if not self.person_id:
-                self.is_known = False
-                logger.warning(f"根据用户名 {person_name} 获取用户ID时，不存在用户{person_name}")
+                logger.warning(f"Person 初始化: 根据用户名 {person_name} 获取用户ID失败")
                 return
         elif platform and user_id:
             self.person_id = get_person_id(platform, user_id)
@@ -314,25 +323,15 @@ class Person:
             raise ValueError("Person 初始化失败，缺少必要参数")
 
         if not is_person_known(person_id=self.person_id):
-            self.is_known = False
-            logger.debug(f"用户 {platform}:{user_id}:{person_name}:{person_id} 尚未认识")
+            logger.debug(
+                f"Person 初始化: 用户 {platform}:{user_id or 'unknown'}:{person_name or 'unknown'}:{self.person_id} 尚未认识"
+            )
             self.person_name = f"未知用户{self.person_id[:4]}"
             return
             # raise ValueError(f"用户 {platform}:{user_id}:{person_name}:{person_id} 尚未认识")
 
-        self.is_known = False
-
-        # 初始化默认值
-        self.nickname = ""
-        self.person_name: Optional[str] = None
-        self.name_reason: Optional[str] = None
-        self.know_times = 0
-        self.know_since = None
-        self.last_know: Optional[float] = None
-        self.memory_points = []
-        self.group_nick_name: list[dict[str, str]] = []  # 群昵称列表，存储 {"group_id": str, "group_nick_name": str}
-
-        # 从数据库加载数据
+        # 已认识用户, load 数据
+        logger.debug(f"Person 初始化: 加载已认识用户 {self.person_id}")
         self.load_from_database()
 
     def del_memory(self, category: str, memory_content: str, similarity_threshold: float = 0.95):
