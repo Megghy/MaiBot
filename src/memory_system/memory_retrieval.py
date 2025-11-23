@@ -1005,14 +1005,16 @@ async def _analyze_question_answer(question: str, answer: str, chat_id: str) -> 
 
             elif category == "人物信息":
                 # 处理人物信息
-                # person_name = analysis_result.get("person_name", "").strip()
-                # memory_content = analysis_result.get("memory_content", "").strip()
-                # if person_name and memory_content:
-                #     from src.person_info.person_info import store_person_memory_from_answer
-                #     await store_person_memory_from_answer(person_name, memory_content, chat_id)
-                # else:
-                #     logger.warning(f"分析为人物信息但未提取到人物名称或记忆内容，问题: {question[:50]}...")
-                pass  # 功能暂时禁用
+                person_name = analysis_result.get("person_name", "").strip()
+                memory_content = analysis_result.get("memory_content", "").strip()
+                if person_name and memory_content:
+                    from src.person_info.person_info import store_person_memory_from_answer
+
+                    await store_person_memory_from_answer(person_name, memory_content, chat_id)
+                else:
+                    logger.warning(
+                        f"分析为人物信息但未提取到人物名称或记忆内容，问题: {question[:50]}...，解析结果: {analysis_result}"
+                    )
 
             else:
                 logger.info(f"问题和答案类别为'其他'，不进行存储，问题: {question[:50]}...")

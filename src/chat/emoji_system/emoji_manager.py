@@ -940,12 +940,12 @@ class EmojiManager:
                     image_base64 = get_image_manager().transform_gif(image_base64)  # type: ignore
                     if not image_base64:
                         raise RuntimeError("GIF表情包转换失败")
-                    prompt = "这是一个动态图表情包，每一张图代表了动态图的某一帧，黑色背景代表透明，简短描述一下表情包表达的情感和内容，从互联网梗,meme的角度去分析，精简回答"
+                    prompt = "这是一个动态图表情包，每一张图代表了动态图的某一帧，黑色背景代表透明，简短描述一下表情包表达的情感和内容，从互联网梗,meme的角度去分析，最多 200到400字"
                     description, _ = await self.vlm.generate_response_for_image(
                         prompt, image_base64, "jpg", temperature=0.5
                     )
                 else:
-                    prompt = "这是一个表情包，请详细描述一下表情包所表达的情感和内容，简短描述细节，从互联网梗,meme的角度去分析，精简回答"
+                    prompt = "这是一个表情包，请详细描述一下表情包所表达的情感和内容，简短描述细节，从互联网梗,meme的角度去分析.最多 200到400字"
                     description, _ = await self.vlm.generate_response_for_image(
                         prompt, image_base64, image_format, temperature=0.5
                     )
@@ -970,7 +970,7 @@ class EmojiManager:
             emotion_prompt = f"""
 这是一个聊天场景中的表情包描述：'{description}'
 
-请你识别这个表情包的含义和适用场景，给我简短的描述，每个描述不要超过15个字
+请你识别这个表情包的含义和适用场景，给我简短的描述，每个描述不要超过30个字
 你可以关注其幽默和讽刺意味，动用贴吧，微博，小红书的知识，必须从互联网梗,meme的角度去分析
 请直接输出描述，不要出现任何其他内容，如果有多个描述，可以用逗号分隔
             """
@@ -1004,6 +1004,9 @@ class EmojiManager:
         Returns:
             bool: 注册是否成功
         """
+        # 确保数据库和目录已经就绪，避免在初始化完成前调用时失败
+        self._ensure_db()
+
         file_full_path = os.path.join(EMOJI_DIR, filename)
         if not os.path.exists(file_full_path):
             logger.error(f"[注册失败] 文件不存在: {file_full_path}")
