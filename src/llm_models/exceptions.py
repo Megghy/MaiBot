@@ -45,9 +45,10 @@ class RespNotOkException(Exception):
         self.message = message
 
     def __str__(self):
-        if self.status_code in error_code_mapping:
-            return error_code_mapping[self.status_code]
-        elif self.message:
+        # if self.status_code in error_code_mapping:
+        #     return error_code_mapping[self.status_code]
+        # el
+        if self.message:
             return self.message
         else:
             return f"未知的异常响应代码：{self.status_code}"
