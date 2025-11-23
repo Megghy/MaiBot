@@ -130,3 +130,26 @@ def weighted_sample(population: List[Dict], k: int) -> List[Dict]:
                 break
 
     return selected
+
+
+def weighted_sample_no_replacement(items: List[Dict], weights: List[float], k: int) -> List[Dict]:
+    """按权重不放回抽样工具."""
+    if not items or not weights or k <= 0:
+        return []
+    selection: List[Dict] = []
+    pool = list(zip(items, weights, strict=False))
+    draw = min(k, len(pool))
+    for _ in range(draw):
+        total = sum(max(w, 0.0) for _, w in pool)
+        if total <= 0:
+            selection.extend(item for item, _, _ in pool[: draw - len(selection)])
+            break
+        threshold = random.uniform(0, total)
+        acc = 0.0
+        for idx, (item, weight, _) in enumerate(pool):
+            acc += max(weight, 0.0)
+            if threshold <= acc:
+                selection.append(item)
+                pool.pop(idx)
+                break
+    return selection

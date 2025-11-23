@@ -145,6 +145,8 @@ THINKING_BACK_NOT_FOUND_RETENTION_SECONDS = 36000  # 未找到答案记录保留
 THINKING_BACK_CLEANUP_INTERVAL_SECONDS = 3000  # 清理频率
 _last_not_found_cleanup_ts: float = 0.0
 MAX_OBSERVATION_LENGTH = 1000  # 工具返回结果最大长度
+MAX_COLLECTED_INFO_LENGTH = 2000  # ReAct上下文最大长度
+COLLECTED_INFO_TRUNCATE_NOTICE = "…（已截断，仅保留最近信息）\n"
 MIN_QA_ANALYSIS_CONFIDENCE = 0.75  # 低于该置信度的结果将被丢弃
 
 # 定义特殊工具用于提交答案
@@ -326,6 +328,58 @@ def _format_answer_payload(
     )
 
 
+def _append_collected_info(current: str, addition: str) -> str:
+    addition = (addition or "").strip()
+    if not addition:
+        return current
+
+    combined = f"{current}\n{addition}" if current else addition
+    combined = combined.strip()
+    if len(combined) <= MAX_COLLECTED_INFO_LENGTH:
+        return combined
+
+    truncated = combined[-MAX_COLLECTED_INFO_LENGTH :]
+    return f"{COLLECTED_INFO_TRUNCATE_NOTICE}{truncated}"
+
+
+def _prepare_collected_info_for_prompt(collected_info: str, limit: int = 1800) -> str:
+    if not collected_info:
+        return "暂无信息"
+
+    if len(collected_info) <= limit:
+        return collected_info
+
+    trimmed = collected_info[-limit:]
+    return f"{COLLECTED_INFO_TRUNCATE_NOTICE}{trimmed}"
+
+
+def _calculate_iteration_budget(question: str, initial_info: str) -> int:
+    base = max(1, getattr(global_config.memory, "max_agent_iterations", 3))
+    if base <= 2:
+        return base
+
+    normalized_question = (question or "").strip()
+    complexity_score = 0
+
+    if len(normalized_question) > 48:
+        complexity_score += 1
+    if len(re.findall(r"[?？]", normalized_question)) > 1:
+        complexity_score += 1
+    detail_keywords = ("为什么", "如何", "怎么", "原因", "步骤", "哪些", "哪几")
+    if any(keyword in normalized_question for keyword in detail_keywords):
+        complexity_score += 1
+    if len(normalized_question) <= 16:
+        complexity_score -= 1
+    if initial_info:
+        complexity_score -= 1
+
+    if complexity_score <= -1:
+        return 2
+    if complexity_score == 0:
+        return max(2, base - 1)
+    return base
+
+
 def _extract_question_from_block(block: str) -> Optional[str]:
     for line in block.splitlines():
         if line.startswith("问题："):
@@ -410,8 +464,9 @@ def init_memory_retrieval_prompt():
 - 思考要简短, 直接切入要点
 - 回答时遵循优先级:
   1. 优先使用检索到的记忆/知识库信息回答问题
-  2. 如果多轮检索后仍然没有找到相关信息, 可以在明确标注 source="model" 的前提下, 使用你作为大语言模型已有的常识或通用知识进行回答
-  3. 不允许胡乱编造明显错误的信息
+  2. 如果确定问题与聊天上下文无关, 并且你确定自己知道高置信度答案, 可以在明确标注 source="model" 的前提下, 使用你作为大语言模型已有的常识或通用知识进行回答
+  3. 如果多轮检索后仍然没有找到相关信息, 可以在明确标注 source="model" 的前提下, 使用你作为大语言模型已有的常识或通用知识进行回答
+  4. 不允许胡乱编造明显错误的信息
 
 当前问题: {question}
 已收集的信息:
@@ -555,7 +610,10 @@ async def _react_agent_solve_question(
         Tuple[bool, str, List[Dict[str, Any]], bool]: (是否找到答案, 答案内容, 思考步骤列表, 是否超时)
     """
     start_time = time.time()
-    collected_info = initial_info if initial_info else ""
+    collected_info = _append_collected_info("", initial_info)
+    configured_budget = max(1, max_iterations or 1)
+    dynamic_budget = _calculate_iteration_budget(question, collected_info)
+    max_iterations = max(1, min(configured_budget, dynamic_budget or configured_budget))
     thinking_steps = []
     is_timeout = False
     conversation_messages: List[Message] = []
@@ -595,7 +653,7 @@ async def _react_agent_solve_question(
                 bot_name=bot_name,
                 time_now=time_now,
                 question=question,
-                collected_info=collected_info if collected_info else "暂无信息",
+                collected_info=_prepare_collected_info_for_prompt(collected_info),
                 current_iteration=current_iteration,
                 remaining_iterations=remaining_iterations,
                 max_iterations=max_iterations,
@@ -627,7 +685,7 @@ async def _react_agent_solve_question(
                 bot_name=bot_name,
                 time_now=time_now,
                 question=question,
-                collected_info=collected_info if collected_info else "",
+                collected_info=_prepare_collected_info_for_prompt(collected_info),
                 current_iteration=current_iteration,
                 remaining_iterations=remaining_iterations,
                 max_iterations=max_iterations,
@@ -734,7 +792,7 @@ async def _react_agent_solve_question(
         if reasoning_content or response:
             thought_summary = reasoning_content or (response[:200] if response else "")
             if thought_summary:
-                collected_info += f"\n[思考] {thought_summary}\n"
+                collected_info = _append_collected_info(collected_info, f"[思考] {thought_summary}")
 
         # 处理工具调用
         if not tool_calls:
@@ -743,7 +801,7 @@ async def _react_agent_solve_question(
             if response and response.strip():
                 step["observations"] = [f"思考完成，但未调用工具。响应: {response}"]
                 logger.info(f"ReAct Agent 第 {iteration + 1} 次迭代 思考完成但未调用工具: {response[:100]}...")
-                collected_info += f"思考: {response}"
+                collected_info = _append_collected_info(collected_info, f"思考: {response}")
                 thinking_steps.append(step)
                 continue
             else:
@@ -833,7 +891,7 @@ async def _react_agent_solve_question(
                     observation_text = observation_text[:MAX_OBSERVATION_LENGTH] + "...(结果过长已截断)"
                 
                 step["observations"].append(observation_text)
-                collected_info += f"\n{observation_text}\n"
+                collected_info = _append_collected_info(collected_info, observation_text)
                 if observation_text.strip():
                     tool_builder = MessageBuilder()
                     tool_builder.set_role(RoleType.Tool)
@@ -1196,23 +1254,27 @@ async def _process_single_question(question: str, chat_id: str, context: str, in
     if cached_result:
         cached_found_answer, cached_answer, cached_steps = cached_result
 
-        if cached_found_answer:  # found_answer == 1 (True)
-            # found_answer == 1：20%概率重新查询
-            if random.random() < 0.5:
-                should_requery = True
-                logger.info(f"found_answer=1，触发20%概率重新查询，问题: {question[:50]}...")
+        if cached_found_answer:
+            # 根据缓存信息的完整度来判断是否直接返回
+            reuse_probability = 0.8
+            if cached_steps:
+                last_source = _extract_answer_source(cached_steps)
+                if last_source == "model":
+                    reuse_probability = 0.4  # 模型常识答案可靠度略低
 
-            if not should_requery and cached_answer:
-                logger.info(f"从thinking_back缓存中获取答案，问题: {question[:50]}...")
+            if cached_answer and random.random() <= reuse_probability:
+                logger.info(f"直接复用thinking_back缓存答案，问题: {question[:50]}... 概率: {reuse_probability}")
                 return _format_answer_payload(
                     question,
                     cached_answer,
                     cached_steps,
                     from_cache=True,
                 )
-            elif not cached_answer:
-                should_requery = True
-                logger.info(f"found_answer=1 但缓存答案为空，重新查询，问题: {question[:50]}...")
+
+            should_requery = True
+            logger.info(f"缓存命中但触发重新检索，问题: {question[:50]}... reuse_probability={reuse_probability:.2f}")
+            if not cached_answer:
+                logger.info(f"缓存答案为空，将强制重新查询，问题: {question[:50]}...")
         else:
             # found_answer == 0：不使用缓存，直接重新查询
             should_requery = True

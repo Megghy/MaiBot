@@ -291,8 +291,7 @@ class PrivateReplyer:
         """构建情绪状态提示"""
         if not global_config.mood.enable_mood:
             return ""
-        mood_state = await mood_manager.get_mood_by_chat_id(self.chat_stream.stream_id).get_mood()
-        return f"你现在的心情是：{mood_state}"
+        return await mood_manager.build_mood_prompt_block(self.chat_stream.stream_id)
 
     def _format_tool_results(self, tool_results: List[Dict[str, Any]]) -> str:
         if not tool_results:

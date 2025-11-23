@@ -10,9 +10,13 @@ from src.config.config import global_config, model_config
 from src.common.logger import get_logger
 from src.common.database.database_model import Expression
 from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
-from src.express.express_utils import weighted_sample
+from src.express.express_utils import weighted_sample, weighted_sample_no_replacement
 
 logger = get_logger("expression_selector")
+
+_RECENCY_DECAY_SECONDS = 7 * 24 * 60 * 60  # 7 days
+_NOVELTY_WINDOW_SECONDS = 2 * 24 * 60 * 60  # 2 days
+_FRESH_COVERAGE_COUNT = 2
 
 
 def init_prompt():
@@ -144,7 +148,10 @@ class ExpressionSelector:
 
             # 随机抽样
             if style_exprs:
-                selected_style = weighted_sample(style_exprs, total_num)
+                now_ts = time.time()
+                weights = [self._calculate_expression_weight(expr, now_ts) for expr in style_exprs]
+                selected_style = weighted_sample_no_replacement(style_exprs, weights, total_num)
+                selected_style = self._ensure_fresh_coverage(selected_style, style_exprs, total_num)
             else:
                 selected_style = []
 
@@ -154,6 +161,44 @@ class ExpressionSelector:
         except Exception as e:
             logger.error(f"随机选择表达方式失败: {e}")
             return []
+
+    def _calculate_expression_weight(self, expression: Dict[str, Any], now_ts: float) -> float:
+        count = max(float(expression.get("count") or 1.0), 1.0)
+        last_active = expression.get("last_active_time") or expression.get("create_date") or now_ts
+        recency_seconds = max(0.0, now_ts - last_active)
+        recency_factor = max(0.4, 1.5 - recency_seconds / _RECENCY_DECAY_SECONDS)
+
+        create_ts = expression.get("create_date") or last_active
+        novelty_seconds = max(0.0, now_ts - create_ts)
+        novelty_factor = 1.25 if novelty_seconds <= _NOVELTY_WINDOW_SECONDS else 1.0
+
+        # 保证非常少用的表达仍有机会被选中
+        popularity_factor = 1.0 + min(count, 10.0) * 0.05
+
+        return max(0.1, recency_factor * novelty_factor * popularity_factor)
+
+    def _ensure_fresh_coverage(
+        self, selected: List[Dict[str, Any]], all_exprs: List[Dict[str, Any]], total_num: int
+    ) -> List[Dict[str, Any]]:
+        if total_num <= 0 or not all_exprs:
+            return selected
+
+        selected_ids = {expr["id"] for expr in selected}
+        newcomers = sorted(
+            all_exprs,
+            key=lambda expr: expr.get("create_date") or expr.get("last_active_time") or 0,
+            reverse=True,
+        )
+
+        for expr in newcomers:
+            if len(selected) >= total_num or len(selected) >= len(all_exprs):
+                break
+            if expr["id"] in selected_ids:
+                continue
+            if len(selected) < _FRESH_COVERAGE_COUNT:
+                selected.append(expr)
+                selected_ids.add(expr["id"])
+        return selected
 
     async def select_suitable_expressions(
         self,

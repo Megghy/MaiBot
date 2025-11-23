@@ -427,6 +427,12 @@ class MoodConfig(ConfigBase):
     emotion_style: str = "情绪较为稳定，但遭遇特定事件的时候起伏较大"
     """情感特征，影响情绪的变化情况"""
 
+    state_refresh_interval: float = 120.0
+    """情绪状态最小刷新间隔(秒)"""
+
+    regression_activity_sample: int = 12
+    """情绪回归时用于检测活跃度的消息样本量"""
+
 
 @dataclass
 class VoiceConfig(ConfigBase):

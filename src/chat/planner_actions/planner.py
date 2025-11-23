@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from src.common.data_models.database_data_model import DatabaseMessages
 
 logger = get_logger("planner")
+MAX_DYNAMIC_ACTION_TOOLS = 6
 
 install(extra_lines=3)
 
@@ -209,7 +210,18 @@ class ActionPlanner:
                 continue
                 
             params = []
-            if action_info.action_parameters:
+            metadata_params = (action_info.metadata or {}).get("tool_parameters") if hasattr(action_info, "metadata") else None
+            if metadata_params:
+                for param in metadata_params:
+                    name = param.get("name")
+                    if not name:
+                        continue
+                    param_type = ToolParamType[param.get("type", "STRING").upper()] if isinstance(param.get("type"), str) else ToolParamType.STRING
+                    desc = param.get("description") or action_info.action_parameters.get(name, "请输入参数")
+                    required = bool(param.get("required", True))
+                    choices = param.get("choices")
+                    params.append((name, param_type, desc, required, choices))
+            elif action_info.action_parameters:
                 for param_name, param_desc in action_info.action_parameters.items():
                     params.append((param_name, ToolParamType.STRING, param_desc, True, None))
             
@@ -270,12 +282,14 @@ class ActionPlanner:
                 )
                 action_type = "no_reply"
 
+            structured_reasoning = self._format_action_reasoning(action_type, reasoning, target_message, action_data)
+
             # 创建ActionPlannerInfo对象
             available_actions_dict = dict(current_available_actions)
             action_planner_infos.append(
                 ActionPlannerInfo(
                     action_type=action_type,
-                    reasoning=reasoning,
+                    reasoning=structured_reasoning,
                     action_data=action_data,
                     action_message=target_message,
                     available_actions=available_actions_dict,
@@ -340,6 +354,9 @@ class ActionPlanner:
 
         # 应用激活类型过滤
         filtered_actions = self._filter_actions_by_activation_type(available_actions, chat_content_block_short)
+        selected_actions = self._select_actions_for_prompt(filtered_actions, chat_content_block_short)
+        if not selected_actions and filtered_actions:
+            selected_actions = filtered_actions
 
         logger.debug(f"{self.log_prefix}过滤后有{len(filtered_actions)}个可用动作")
 
@@ -352,7 +369,7 @@ class ActionPlanner:
         prompt, message_id_list = await self.build_planner_prompt(
             is_group_chat=is_group_chat,
             chat_target_info=chat_target_info,
-            current_available_actions=filtered_actions,
+            current_available_actions=selected_actions,
             chat_content_block=chat_content_block,
             message_id_list=message_id_list,
             interest=global_config.personality.interest,
@@ -363,7 +380,7 @@ class ActionPlanner:
         reasoning, actions = await self._execute_main_planner(
             prompt=prompt,
             message_id_list=message_id_list,
-            filtered_actions=filtered_actions,
+            filtered_actions=selected_actions,
             available_actions=available_actions,
             loop_start_time=loop_start_time,
         )
@@ -631,6 +648,74 @@ class ActionPlanner:
             action_options_block += using_action_prompt
 
         return action_options_block
+
+    def _select_actions_for_prompt(
+        self, available_actions: Dict[str, ActionInfo], chat_content_block: str
+    ) -> Dict[str, ActionInfo]:
+        if len(available_actions) <= MAX_DYNAMIC_ACTION_TOOLS:
+            return available_actions
+
+        scored_actions: List[Tuple[str, ActionInfo, float]] = []
+        for name, info in available_actions.items():
+            score = self._score_action(info, chat_content_block)
+            scored_actions.append((name, info, score))
+
+        scored_actions.sort(key=lambda item: item[2], reverse=True)
+        top_items = scored_actions[:MAX_DYNAMIC_ACTION_TOOLS]
+        return {name: info for name, info, _ in top_items}
+
+    def _score_action(self, action_info: ActionInfo, chat_content_block: str) -> float:
+        score = 0.0
+        activation = action_info.activation_type
+        if activation == ActionActivationType.ALWAYS:
+            score += 3
+        elif activation == ActionActivationType.LLM_JUDGE:
+            score += 2
+        elif activation == ActionActivationType.RANDOM:
+            score += 1
+
+        if action_info.parallel_action:
+            score -= 0.3
+
+        keywords = action_info.activation_keywords or []
+        if keywords:
+            for keyword in keywords:
+                if keyword and keyword in chat_content_block:
+                    score += 1.5
+                    break
+
+        metadata_priority = 1.0
+        if hasattr(action_info, "metadata") and action_info.metadata:
+            metadata_priority = float(action_info.metadata.get("planner_priority", metadata_priority))
+        score *= metadata_priority
+        return score
+
+    def _format_action_reasoning(
+        self,
+        action_type: str,
+        reasoning: str,
+        target_message: Optional["DatabaseMessages"],
+        action_data: Dict[str, Any],
+    ) -> str:
+        parts: List[str] = []
+        if reasoning:
+            parts.append(reasoning.strip())
+
+        if target_message and (target_message.processed_plain_text or target_message.display_message):
+            content = target_message.processed_plain_text or target_message.display_message or ""
+            content = content.strip()
+            if content:
+                excerpt = content[:80] + ("..." if len(content) > 80 else "")
+                parts.append(f"目标消息: {excerpt}")
+
+        if action_data:
+            kv_pairs = [f"{k}={v}" for k, v in action_data.items() if v not in (None, "")]
+            if kv_pairs:
+                parts.append("参数: " + ", ".join(kv_pairs))
+
+        if not parts:
+            return f"{action_type}:（无reason）"
+        return " | ".join(parts)
 
     async def _execute_main_planner(
         self,

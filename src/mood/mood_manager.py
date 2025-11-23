@@ -1,4 +1,6 @@
 import time
+import asyncio
+from typing import Final
 
 from src.common.logger import get_logger
 from src.config.config import global_config, model_config
@@ -10,6 +12,10 @@ from src.manager.async_task_manager import AsyncTask, async_task_manager
 
 
 logger = get_logger("mood")
+
+# 多阶段情绪回归间隔（秒），参考记忆遗忘的分阶段调度
+_MOOD_DECAY_PHASES: Final[tuple[int, ...]] = (180, 600, 1800)
+_DEFAULT_STATE_REFRESH_SECONDS: Final[int] = 120
 
 
 def init_prompt():
@@ -63,6 +69,7 @@ class ChatMood:
         self.mood_model = LLMRequest(model_set=model_config.model_task_config.utils, request_type="mood")
 
         self.last_change_time: float = 0
+        self._state_lock = asyncio.Lock()
 
     async def get_mood(self) -> str:
         self.regression_count = 0
@@ -119,6 +126,38 @@ class ChatMood:
 
         return response
 
+    async def ensure_recent_state(self, refresh_interval: float = _DEFAULT_STATE_REFRESH_SECONDS) -> None:
+        """按需刷新情绪，避免频繁触发LLM"""
+        if refresh_interval <= 0:
+            await self.get_mood()
+            return
+
+        now = time.time()
+        if now - self.last_change_time < refresh_interval:
+            return
+
+        async with self._state_lock:
+            # 双重检查，避免并发重复刷新
+            if time.time() - self.last_change_time < refresh_interval:
+                return
+            await self.get_mood()
+
+    def _describe_trend(self) -> str:
+        stage_desc = ["情绪刚刚更新", "正在平复", "趋于平静"]
+        idx = min(self.regression_count, len(stage_desc) - 1)
+        idle_minutes = max(0, int((time.time() - self.last_change_time) / 60))
+        if idle_minutes <= 1:
+            idle_text = "刚刚变化"
+        else:
+            idle_text = f"已持续{idle_minutes}分钟"
+        return f"{stage_desc[idx]}，{idle_text}"
+
+    def build_prompt_block(self) -> str:
+        if not self.mood_state:
+            return ""
+        trend = self._describe_trend()
+        return f"当前心情：{self.mood_state}（{trend}）"
+
     async def regress_mood(self):
         message_time = time.time()
         message_list_before_now = get_raw_msg_by_timestamp_with_chat_inclusive(
@@ -166,6 +205,7 @@ class ChatMood:
         logger.info(f"{self.log_prefix} 情绪状态转变为: {response}")
 
         self.mood_state = response
+        self.last_change_time = message_time
 
         self.regression_count += 1
 
@@ -178,16 +218,49 @@ class MoodRegressionTask(AsyncTask):
     async def run(self):
         logger.debug("开始情绪回归任务...")
         now = time.time()
+        threshold_factor = max(0.1, float(global_config.mood.mood_update_threshold))
         for mood in self.mood_manager.mood_list:
             if mood.last_change_time == 0:
                 continue
 
-            if now - mood.last_change_time > 200:
-                if mood.regression_count >= 2:
-                    continue
+            if mood.regression_count >= len(_MOOD_DECAY_PHASES):
+                continue
 
-                logger.debug(f"{mood.log_prefix} 开始情绪回归, 第 {mood.regression_count + 1} 次")
-                await mood.regress_mood()
+            required_idle = _MOOD_DECAY_PHASES[mood.regression_count] * threshold_factor
+            activity_factor = self._calculate_activity_factor(mood, now)
+            adjusted_required_idle = required_idle / activity_factor
+            idle_duration = now - mood.last_change_time
+
+            if idle_duration < adjusted_required_idle:
+                continue
+
+            logger.debug(
+                f"{mood.log_prefix} 开始情绪回归, 阶段 {mood.regression_count + 1}, "
+                f"已空闲 {idle_duration:.0f}s / 阈值 {required_idle:.0f}s"
+            )
+            await mood.regress_mood()
+
+    def _calculate_activity_factor(self, mood: ChatMood, now: float) -> float:
+        sample_size = max(3, int(getattr(global_config.mood, "regression_activity_sample", 12)))
+        try:
+            recent_messages = get_raw_msg_by_timestamp_with_chat_inclusive(
+                chat_id=mood.chat_id,
+                timestamp_start=mood.last_change_time,
+                timestamp_end=now,
+                limit=sample_size,
+                limit_mode="last",
+            )
+        except Exception as exc:
+            logger.debug(f"获取情绪回归消息样本失败: {exc}")
+            return 1.0
+
+        activity_count = len(recent_messages or [])
+        if activity_count == 0:
+            return 1.0
+
+        # 最多将等待时间缩短至原来的一半
+        activity_ratio = min(activity_count / sample_size, 1.0)
+        return 1.0 + activity_ratio
 
 
 class MoodManager:
@@ -222,6 +295,23 @@ class MoodManager:
                 mood.regression_count = 0
                 return
         self.mood_list.append(ChatMood(chat_id))
+
+    async def build_mood_prompt_block(self, chat_id: str, refresh_interval: float | None = None) -> str:
+        if not global_config.mood.enable_mood:
+            return ""
+
+        interval = (
+            refresh_interval
+            if refresh_interval is not None
+            else getattr(global_config.mood, "state_refresh_interval", _DEFAULT_STATE_REFRESH_SECONDS)
+        )
+
+        chat_mood = self.get_mood_by_chat_id(chat_id)
+        try:
+            await chat_mood.ensure_recent_state(interval)
+        except Exception as exc:
+            logger.warning(f"刷新情绪失败: {exc}")
+        return chat_mood.build_prompt_block()
 
 
 init_prompt()
