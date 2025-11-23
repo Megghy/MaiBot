@@ -65,6 +65,7 @@ MODEL_REASONING_PREFERENCES: dict[str, dict[str, Any]] = {
         "thinking_level": ThinkingLevel.LOW,
         "budget_cap": 2048,
         "reasoning_char_limit": 600,
+        "disable_thinking_budget": True,
     }
 }
 
@@ -512,6 +513,8 @@ class GeminiClient(BaseClient):
         prefs = MODEL_REASONING_PREFERENCES.get(model_id)
         if not prefs:
             return tb
+        if prefs.get("disable_thinking_budget"):
+            return THINKING_BUDGET_AUTO
         budget_cap = prefs.get("budget_cap")
         if budget_cap is None:
             return tb
@@ -526,8 +529,10 @@ class GeminiClient(BaseClient):
         prefs = MODEL_REASONING_PREFERENCES.get(model_id)
         config_kwargs: dict[str, Any] = {
             "include_thoughts": True,
-            "thinking_budget": tb,
         }
+        budget_disabled = prefs.get("disable_thinking_budget") if prefs else False
+        if not budget_disabled and tb is not None:
+            config_kwargs["thinking_budget"] = tb
         if prefs and prefs.get("thinking_level"):
             config_kwargs["thinking_level"] = prefs["thinking_level"]
         return ThinkingConfig(**config_kwargs)
