@@ -64,7 +64,6 @@ MODEL_REASONING_PREFERENCES: dict[str, dict[str, Any]] = {
     "gemini-3-pro-preview": {
         "thinking_level": ThinkingLevel.LOW,
         "budget_cap": 2048,
-        "reasoning_char_limit": 600,
         "disable_thinking_budget": True,
     }
 }
@@ -537,19 +536,6 @@ class GeminiClient(BaseClient):
             config_kwargs["thinking_level"] = prefs["thinking_level"]
         return ThinkingConfig(**config_kwargs)
 
-    @staticmethod
-    def _trim_reasoning_content(resp: APIResponse, model_id: str) -> None:
-        prefs = MODEL_REASONING_PREFERENCES.get(model_id)
-        if not prefs:
-            return
-        char_limit = prefs.get("reasoning_char_limit")
-        if not char_limit or not resp.reasoning_content:
-            return
-        if len(resp.reasoning_content) <= char_limit:
-            return
-        trimmed = resp.reasoning_content[:char_limit].rstrip()
-        resp.reasoning_content = f"{trimmed}…"
-
     async def get_response(
         self,
         model_info: ModelInfo,
@@ -690,10 +676,6 @@ class GeminiClient(BaseClient):
         except Exception as e:
             # 其他未预料的错误，才归为网络连接类
             raise NetworkConnectionError() from e
-
-        self._trim_reasoning_content(resp, model_identifier)
-
-        self._trim_reasoning_content(resp, raw_model_identifier)
 
         if usage_record:
             resp.usage = UsageRecord(
