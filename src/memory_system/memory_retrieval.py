@@ -13,6 +13,14 @@ from json_repair import repair_json
 from src.memory_system.retrieval_tools import get_tool_registry, init_all_tools
 from src.memory_system.retrieval_tools.query_lpmm_knowledge import query_lpmm_knowledge
 from src.chat.knowledge import get_qa_manager
+
+
+def _safe_str(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if value is None:
+        return ""
+    return str(value).strip()
 from src.llm_models.payload_content.message import MessageBuilder, RoleType, Message
 from src.llm_models.payload_content.tool_option import ToolParamType
 
@@ -22,6 +30,7 @@ THINKING_BACK_NOT_FOUND_RETENTION_SECONDS = 36000  # 未找到答案记录保留
 THINKING_BACK_CLEANUP_INTERVAL_SECONDS = 3000  # 清理频率
 _last_not_found_cleanup_ts: float = 0.0
 MAX_OBSERVATION_LENGTH = 1000  # 工具返回结果最大长度
+MIN_QA_ANALYSIS_CONFIDENCE = 0.75  # 低于该置信度的结果将被丢弃
 
 # 定义特殊工具用于提交答案
 SPECIAL_TOOL_DEFINITIONS = [
@@ -367,9 +376,6 @@ Action: 调用 `found_answer(answer="昨天张三提到了GitHub", source="memor
 """,
         name="memory_retrieval_react_final_prompt",
     )
-
-
-def _parse_react_response(response: str) -> Optional[Dict[str, Any]]:
     """解析ReAct Agent的响应
     
     Args:
@@ -948,25 +954,23 @@ async def _analyze_question_answer(question: str, answer: str, chat_id: str) -> 
     """
     try:
         # 使用LLM分析类别
-        analysis_prompt = f"""请分析以下问题和答案的类别：
-
-问题：{question}
-答案：{answer}
-
-类别说明：
-1. 人物信息：有关某个用户的个体信息（如某人的喜好、习惯、经历等）
-2. 黑话：对特定概念、缩写词、谐音词、自创词的解释（如"yyds"、"社死"等）
-3. 其他：除此之外的其他内容
-
-请输出JSON格式：
-{{
-    "category": "人物信息" | "黑话" | "其他",
-    "jargon_keyword": "如果是黑话，提取关键词（如'yyds'），否则为空字符串",
-    "person_name": "如果是人物信息，提取人物名称，否则为空字符串",
-    "memory_content": "如果是人物信息，提取要存储的记忆内容（简短概括），否则为空字符串"
-}}
-
-只输出JSON，不要输出其他内容："""
+        analysis_prompt = (
+            "你需要阅读一问一答并提取其中的关键信息，可同时包含多类：\n"
+            "- 人物信息：包含某位用户的喜好、习惯、经历等事实\n"
+            "- 黑话：解释网络黑话/缩写/自创词（如\"yyds\"、\"社死\"）\n"
+            "- 其他：除上述两类之外\n\n"
+            "输出一个 JSON 数组，每个元素描述一条命中结果，格式如下（字段均为字符串，confidence 为 0-1 之间的数字字符串）：\n"
+            "[\n  {\n"
+            '    "category": "人物信息" 或 "黑话" 或 "其他",\n'
+            '    "person_name": "若为人物信息则给出人名，否则留空",\n'
+            '    "memory_content": "若为人物信息则给出一句简短记忆，否则留空",\n'
+            '    "jargon_keyword": "若为黑话则给出词条，否则留空",\n'
+            '    "confidence": "0.0 到 1.0 的数字，表示判定置信度"\n'
+            "  }\n]\n"
+            "无命中请输出空数组 []。禁止输出除 JSON 外的任何内容。\n\n"
+            f"问题：\"{question}\"\n"
+            f"答案：\"{answer}\""
+        )
 
         success, response, _, _ = await llm_api.generate_with_model(
             analysis_prompt,
@@ -982,42 +986,68 @@ async def _analyze_question_answer(question: str, answer: str, chat_id: str) -> 
         try:
             json_pattern = r"```json\s*(.*?)\s*```"
             matches = re.findall(json_pattern, response, re.DOTALL)
+            json_candidates = matches if matches else [response.strip()]
 
-            if matches:
-                json_str = matches[0]
-            else:
-                json_str = response.strip()
+            parsed_entries: List[Dict[str, Any]] = []
+            for candidate in reversed(json_candidates):
+                try:
+                    repaired_json = repair_json(candidate)
+                    parsed_candidate = json.loads(repaired_json)
+                    if isinstance(parsed_candidate, dict):
+                        parsed_entries = [parsed_candidate]
+                    elif isinstance(parsed_candidate, list):
+                        parsed_entries = [item for item in parsed_candidate if isinstance(item, dict)]
+                    else:
+                        continue
+                    if parsed_entries:
+                        break
+                except Exception:
+                    continue
 
-            repaired_json = repair_json(json_str)
-            analysis_result = json.loads(repaired_json)
+            if not parsed_entries:
+                raise ValueError("LLM响应未返回有效的对象列表")
 
-            category = analysis_result.get("category", "").strip()
+            stored_any = False
+            for entry in parsed_entries:
+                category = _safe_str(entry.get("category"))
+                if category not in {"人物信息", "黑话", "其他"}:
+                    logger.debug(
+                        f"跳过未知分类: {category}，问题: {question[:50]}..."
+                    )
+                    continue
 
-            if category == "黑话":
-                # 处理黑话
-                jargon_keyword = analysis_result.get("jargon_keyword", "").strip()
-                if jargon_keyword:
+                confidence_raw = _safe_str(entry.get("confidence"))
+                try:
+                    confidence = float(confidence_raw) if confidence_raw else 0.0
+                except ValueError:
+                    confidence = 0.0
+
+                if confidence < MIN_QA_ANALYSIS_CONFIDENCE:
+                    logger.debug(
+                        f"置信度过低({confidence:.2f}< {MIN_QA_ANALYSIS_CONFIDENCE}),跳过分类 {category}，问题: {question[:50]}..."
+                    )
+                    continue
+
+                if category == "黑话":
+                    jargon_keyword = _safe_str(entry.get("jargon_keyword"))
+                    if not jargon_keyword:
+                        continue
                     from src.jargon.jargon_miner import store_jargon_from_answer
 
                     await store_jargon_from_answer(jargon_keyword, answer, chat_id)
-                else:
-                    logger.warning(f"分析为黑话但未提取到关键词，问题: {question[:50]}...")
-
-            elif category == "人物信息":
-                # 处理人物信息
-                person_name = analysis_result.get("person_name", "").strip()
-                memory_content = analysis_result.get("memory_content", "").strip()
-                if person_name and memory_content:
+                    stored_any = True
+                elif category == "人物信息":
+                    person_name = _safe_str(entry.get("person_name"))[:32]
+                    memory_content = _safe_str(entry.get("memory_content"))[:120]
+                    if not (person_name and memory_content):
+                        continue
                     from src.person_info.person_info import store_person_memory_from_answer
 
                     await store_person_memory_from_answer(person_name, memory_content, chat_id)
-                else:
-                    logger.warning(
-                        f"分析为人物信息但未提取到人物名称或记忆内容，问题: {question[:50]}...，解析结果: {analysis_result}"
-                    )
+                    stored_any = True
 
-            else:
-                logger.info(f"问题和答案类别为'其他'，不进行存储，问题: {question[:50]}...")
+            if not stored_any:
+                logger.info(f"本次分析未提取可存储的黑话/人物信息，问题: {question[:50]}...")
 
         except Exception as e:
             logger.error(f"解析分析结果失败: {e}, 响应: {response[:200]}...")
