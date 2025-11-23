@@ -3,16 +3,131 @@ import json
 import re
 import random
 import asyncio
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Set
 from src.common.logger import get_logger
 from src.config.config import global_config, model_config
 from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
-from src.plugin_system.apis import llm_api
+from src.plugin_system.apis import llm_api, database_api, message_api
 from src.common.database.database_model import ThinkingBack
 from json_repair import repair_json
 from src.memory_system.retrieval_tools import get_tool_registry, init_all_tools
 from src.memory_system.retrieval_tools.query_lpmm_knowledge import query_lpmm_knowledge
 from src.chat.knowledge import get_qa_manager
+from src.person_info.person_info import Person
+
+
+def _extract_keywords(text: str, *, max_keywords: int = 6) -> List[str]:
+    if not text:
+        return []
+
+    tokens = re.findall(r"[A-Za-z0-9\u4e00-\u9fff]{2,}", text)
+    keywords: List[str] = []
+    for token in tokens:
+        if token in keywords:
+            continue
+        keywords.append(token)
+        if len(keywords) >= max_keywords:
+            break
+    return keywords
+
+
+def _build_focus_summary(chat_history: str, target_message: str, keywords: List[str]) -> str:
+    summary_lines: List[str] = []
+    if chat_history:
+        recent_lines = chat_history.strip().splitlines()[-5:]
+        summary_lines.append("最近对话片段：")
+        summary_lines.extend(recent_lines)
+    if target_message:
+        summary_lines.append(f"当前消息：{_truncate_text(target_message, 80)}")
+    if keywords:
+        summary_lines.append("关键词提示：" + "、".join(keywords))
+    return "\n".join(summary_lines) if summary_lines else "无可用摘要"
+
+
+def _build_fallback_question(sender: str, target_message: str) -> Optional[str]:
+    core = target_message.strip() if target_message else "这条消息"
+    core = _truncate_text(core, 24) or "这条消息"
+    sender = sender or "对方"
+    return f"{sender} 提到的“{core}”指的具体事件或背景是什么？"
+
+
+async def _record_question_generation_trace(
+    chat_stream,
+    question_prompt: str,
+    response: str,
+    concepts: List[str],
+    questions: List[str],
+) -> None:
+    try:
+        action_data = {
+            "prompt": question_prompt,
+            "response": response,
+            "concepts": concepts,
+            "questions": questions,
+        }
+        await database_api.store_action_info(
+            chat_stream=chat_stream,
+            action_name="memory_question_generation",
+            action_data=action_data,
+            action_reasoning="question_generation",
+        )
+    except Exception as exc:
+        logger.warning(f"记录问题生成追踪失败: {exc}")
+
+
+def _build_participant_hints(chat_id: str, *, limit: int = 10) -> str:
+    """聚合最近聊天参与者与人物记忆摘要，辅助question prompt理解指代"""
+
+    try:
+        end_time = time.time()
+        start_time = max(0.0, end_time - 3600)
+        recent_messages = message_api.get_messages_by_time_in_chat(
+            chat_id=chat_id,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            filter_mai=False,
+            filter_command=True,
+        )
+    except Exception as exc:
+        logger.warning(f"获取参与者信息失败: {exc}")
+        recent_messages = []
+
+    participants: Dict[str, Dict[str, Any]] = {}
+    for msg in recent_messages:
+        user_info = msg.user_info
+        if not user_info:
+            continue
+        key = f"{user_info.platform}:{user_info.user_id}"
+        if key in participants:
+            continue
+        person = Person(platform=user_info.platform, user_id=user_info.user_id)
+        if not person.person_name:
+            continue
+        memory_preview = ""
+        if person.memory_points:
+            sample = person.memory_points[0]
+            memory_preview = sample if isinstance(sample, str) else ""
+
+        participants[key] = {
+            "name": person.person_name,
+            "known": person.is_known,
+            "memory": memory_preview,
+        }
+
+    if not participants:
+        return "最近未识别出其他角色。"
+
+    lines = [
+        "最近角色线索：",
+    ]
+    for info in participants.values():
+        note = "已登记" if info.get("known") else "未知"
+        memory = info.get("memory")
+        memory_str = f"；记忆片段：{memory}" if memory else ""
+        lines.append(f"- {info['name']}（{note}）{memory_str}")
+
+    return "\n".join(lines)
 
 
 def _safe_str(value: Any) -> str:
@@ -248,53 +363,38 @@ def init_memory_retrieval_prompt():
     # 第一步：问题生成prompt
     Prompt(
         """
-你的名字是 {bot_name}. 现在是 {time_now}.
-群里正在进行的聊天内容:
+你的名字是 {bot_name}, 现在是 {time_now}.
+你会拿到四段上下文:
+1. 聊天主干 (最近几轮消息)
 {chat_history}
-
+2. 最近已查询/回答的问题摘要 (可追问, 可补充细节)
 {recent_query_history}
+3. 角色线索 (帮你处理指代和昵称)
+{participant_hints}
+4. 对话焦点概览 (自动提取的摘要与关键词)
+{focus_summary}
 
-现在, {sender} 发送了内容: {target_message}, 你想要回复 ta.
-请仔细分析聊天内容, 考虑以下几点:
-1. 对话中是否提到了过去发生的事情、人物、事件或信息
-2. 是否有需要回忆的内容(比如 "之前说过","上次","以前" 等)
-3. 是否有需要查找历史信息的问题
-4. 是否有问题可以搜集信息帮助你聊天
-5. 对话中是否包含黑话、俚语、缩写等可能需要查询的概念
+当前 {sender} 说: {target_message}
 
-重要提示:
-- **每次只能提出一个问题**, 选择最需要查询的关键问题
-- 如果 "最近已查询的问题和结果" 中已经包含了类似的问题并得到了答案, 请避免重复生成相同或相似的问题, 不需要重复查询
-- 如果之前已经查询过某个问题但未找到答案, 可以尝试用不同的方式提问或更具体的问题
-- 如果你根据当前对话内容和你自己的常识已经可以高置信度地回复 {sender} 的内容, 且认为额外检索不会显著提升回答质量, 则可以直接认为本轮不需要检索, 按 "不需要检索" 的输出格式返回
+任务: 判断是否需要回忆历史信息来回复, 并给出需要检索的关键词与问题.
 
-如果你认为需要从记忆中检索信息来回答, 请:
-1. 识别对话中可能需要查询的概念(黑话/俚语/缩写/专有名词等关键词), 放入 "concepts" 字段
-2. 根据上下文提出 **一个** 最关键的问题来帮助你回复目标消息, 放入 "questions" 字段
+操作步骤:
+1. 先根据上下文拆分出角色/事件/时间/地点/术语等可能缺失的信息.
+2. 如果这些信息会明显提升回答质量, 记录相应的概念关键词.
+3. 汇总出最关键的 1~3 个检索问题 (按重要度降序). 若确实不需要检索, 返回空数组.
 
-问题格式示例:
-- "xxx 在前几天干了什么"
-- "xxx 是什么"
-- "xxxx 和 xxx 的关系是什么"
-- "xxx 在某个时间点发生了什么"
+编写问题时请注意:
+- 聊天里若出现 "上次", "那个ta", "之前说" 等模糊指代, 需要展开成可检索的问题.
+- 如果 recent_query_history 已有部分答案, 但你还需更多细节, 可以在问题里说明想补充的方向.
+- 先确保真的无法用现有信息回复, 再提出检索.
 
-输出格式示例(需要检索时):
-```json
+输出 JSON, 且只输出 JSON:
 {{
-  "concepts": ["AAA", "BBB", "CCC"], # 需要检索的概念列表(字符串数组), 如果不需要检索概念则输出空数组 []
-  "questions": ["张三在前几天干了什么"] # 问题数组(字符串数组), 如果不需要检索记忆则输出空数组 [], 如果需要检索则只输出包含一个问题的数组
+  "concepts": ["概念A", "概念B"],
+  "questions": ["问题1", "问题2", "问题3"]
 }}
-```
 
-输出格式示例(不需要检索时):
-```json
-{{
-  "concepts": [],
-  "questions": []
-}}
-```
-
-请只输出 JSON 对象, 不要输出其他内容:
+当无需检索时, concepts 与 questions 都输出 [] 即可.
 """,
         name="memory_retrieval_question_prompt",
     )
@@ -333,10 +433,10 @@ def init_memory_retrieval_prompt():
 - 如果信息不足且需要继续查询, 说明最需要查询什么, 并输出为纯文本说明, 然后调用相应工具查询(可并行调用多个工具)
 
 **示例:**
-Think: 用户问“昨天群里谁提到了GitHub”。我需要查询昨天的聊天记录。
+Think: 用户问 "昨天群里谁提到了GitHub". 我需要查询昨天的聊天记录.
 Action: 调用 `search_chat_history(keyword="GitHub", time_range="1d")`
-Observation: 工具返回：[张三] 昨天 10:00 说：GitHub 上那个项目不错。
-Think: 我找到了答案，是张三。我应该提交答案。
+Observation: 工具返回: [张三] 昨天 10:00 说: GitHub 上那个项目不错.
+Think: 我找到了答案, 是张三. 我应该提交答案.
 Action: 调用 `found_answer(answer="昨天张三提到了GitHub", source="memory")`
 
 **重要规则:**
@@ -1191,6 +1291,11 @@ async def build_memory_retrieval_prompt(
         if not recent_query_history:
             recent_query_history = "最近没有查询记录。"
 
+        participant_hints = _build_participant_hints(chat_id)
+
+        keywords = _extract_keywords(target)
+        focus_summary = _build_focus_summary(message, target, keywords)
+
         # 第一步：生成问题
         question_prompt = await global_prompt_manager.format_prompt(
             "memory_retrieval_question_prompt",
@@ -1198,6 +1303,8 @@ async def build_memory_retrieval_prompt(
             time_now=time_now,
             chat_history=message,
             recent_query_history=recent_query_history,
+            participant_hints=participant_hints,
+            focus_summary=focus_summary,
             sender=sender,
             target_message=target,
         )
@@ -1236,21 +1343,18 @@ async def build_memory_retrieval_prompt(
         cached_memories = _get_cached_memories(chat_id, time_window_seconds=300.0)
 
         if not questions:
-            logger.debug("模型认为不需要检索记忆或解析失败")
-            # 即使没有当次查询，也返回缓存的记忆和概念检索结果
-            all_results = []
-            if initial_info:
-                all_results.append(initial_info.strip())
-            if cached_memories:
-                all_results.extend(cached_memories)
+            fallback = _build_fallback_question(sender, target)
+            if fallback:
+                logger.info("问题列表为空，使用自动回退问题")
+                questions = [fallback]
 
-            if all_results:
-                retrieved_memory = "\n\n".join(all_results)
-                end_time = time.time()
-                logger.info(f"无当次查询，返回缓存记忆和概念检索结果，耗时: {(end_time - start_time):.3f}秒")
-                return f"你回忆起了以下信息：\n{retrieved_memory}\n如果与回复内容相关，可以参考这些回忆的信息。\n"
-            else:
-                return ""
+        await _record_question_generation_trace(
+            chat_stream,
+            question_prompt,
+            response,
+            concepts,
+            questions,
+        )
 
         logger.info(f"解析到 {len(questions)} 个问题: {questions}")
 
@@ -1275,10 +1379,10 @@ async def build_memory_retrieval_prompt(
                 logger.error(f"处理问题 '{questions[i]}' 时发生异常: {result}")
             elif result is not None:
                 all_results.append(result)
-                # 提取问题用于去重
                 question_line = _extract_question_from_block(result)
                 if question_line:
                     current_questions.add(question_line)
+                    logger.debug(f"提取到问题：{question_line[:50]}...")
 
         # 将缓存的记忆添加到结果中（排除当次查询已包含的问题，避免重复）
         for cached_memory in cached_memories:
