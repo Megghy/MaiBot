@@ -202,6 +202,51 @@ class HeartFChatting:
             threshold = 1
 
         if len(recent_messages_list) >= threshold:
+
+            # --- 防抖机制 Start ---
+            try:
+                last_msg = recent_messages_list[-1]
+                
+                # 1. 判断是否被 @ (高优先级，跳过防抖)
+                is_mention = getattr(last_msg, "is_mentioned", False) or getattr(last_msg, "is_at", False)
+                
+                if is_mention:
+                    logger.debug(f"{self.log_prefix} 检测到 @ 消息，跳过静默防抖等待")
+                else:
+                    # 2. 动态计算需要的静默时间
+                    # 如果之前代码里消息对象用的是 create_time (float) 则直接用，如果是 datetime 需注意转换
+                    last_msg_time = getattr(last_msg, "create_time", None) or getattr(last_msg, "time", None)
+                    
+                    if last_msg_time is not None:
+                        # 定义动态阈值参数 (建议提取到 config 中，这里硬编码也没问题)
+                        base_short_idle = 6.0       # 激进模式：等待较短 (比如对方正在连续输出，但我插话快)
+                        base_long_idle = 15.0        # 休闲模式：等待较长 (防止打断对方长段落)
+                        recent_speak_window = 60.0  # 判定"刚才聊过天"的时间窗口
+                        
+                        now = time.time()
+                        
+                        # 判断当前聊天节奏
+                        if now - self.last_active_time < recent_speak_window:
+                            idle_threshold = base_short_idle
+                        else:
+                            idle_threshold = base_long_idle
+
+                        # 计算已经安静了多久
+                        idle_seconds = now - float(last_msg_time)
+                        
+                        # 如果安静时间还不够，就再睡一会儿
+                        if idle_seconds < idle_threshold:
+                            wait_time = idle_threshold - idle_seconds
+                            if wait_time > 0:
+                                logger.debug(f"{self.log_prefix} 防抖等待: 需静默 {idle_threshold}s, 当前 {idle_seconds:.2f}s, 继续等待 {wait_time:.2f}s")
+                                await asyncio.sleep(wait_time)
+                                # 返回 True 会导致 _main_chat_loop 立即重置循环
+                                # 从而重新获取消息列表。如果用户发了新消息，last_msg 更新，计时重置。
+                                return True
+            except Exception as e:
+                logger.warning(f"{self.log_prefix} 计算消息静默时间失败，跳过防抖: {e}")
+            # --- 防抖机制 End ---
+
             # for message in recent_messages_list:
             # print(message.processed_plain_text)
             # !处理no_reply_until_call逻辑

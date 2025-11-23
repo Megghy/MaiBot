@@ -12,6 +12,7 @@ from google.genai.types import (
     ContentListUnion,
     ContentUnion,
     ThinkingConfig,
+    ThinkingLevel,
     Tool,
     GoogleSearch,
     GenerateContentConfig,
@@ -53,10 +54,19 @@ THINKING_BUDGET_LIMITS = {
     "gemini-2.5-flash": {"min": 1, "max": 24576, "can_disable": True},
     "gemini-2.5-flash-lite": {"min": 512, "max": 24576, "can_disable": True},
     "gemini-2.5-pro": {"min": 128, "max": 32768, "can_disable": False},
+    "gemini-3-pro-preview": {"min": 64, "max": 8192, "can_disable": False},
 }
 # 思维预算特殊值
 THINKING_BUDGET_AUTO = -1  # 自动调整思考预算，由模型决定
 THINKING_BUDGET_DISABLED = 0  # 禁用思考预算（如果模型允许禁用）
+
+MODEL_REASONING_PREFERENCES: dict[str, dict[str, Any]] = {
+    "gemini-3-pro-preview": {
+        "thinking_level": ThinkingLevel.LOW,
+        "budget_cap": 2048,
+        "reasoning_char_limit": 600,
+    }
+}
 
 gemini_safe_settings = [
     SafetySetting(category=HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=HarmBlockThreshold.BLOCK_NONE),
@@ -497,6 +507,44 @@ class GeminiClient(BaseClient):
         logger.warning(f"模型 {model_id} 未在 THINKING_BUDGET_LIMITS 中定义，已启用模型自动预算兼容")
         return THINKING_BUDGET_AUTO
 
+    @staticmethod
+    def _apply_reasoning_budget_cap(tb: int, model_id: str) -> int:
+        prefs = MODEL_REASONING_PREFERENCES.get(model_id)
+        if not prefs:
+            return tb
+        budget_cap = prefs.get("budget_cap")
+        if budget_cap is None:
+            return tb
+        if tb in (None, THINKING_BUDGET_AUTO):
+            return budget_cap
+        if tb == THINKING_BUDGET_DISABLED:
+            return max(1, min(budget_cap, 1))
+        return min(tb, budget_cap)
+
+    @staticmethod
+    def _build_thinking_config(model_id: str, tb: int) -> ThinkingConfig:
+        prefs = MODEL_REASONING_PREFERENCES.get(model_id)
+        config_kwargs: dict[str, Any] = {
+            "include_thoughts": True,
+            "thinking_budget": tb,
+        }
+        if prefs and prefs.get("thinking_level"):
+            config_kwargs["thinking_level"] = prefs["thinking_level"]
+        return ThinkingConfig(**config_kwargs)
+
+    @staticmethod
+    def _trim_reasoning_content(resp: APIResponse, model_id: str) -> None:
+        prefs = MODEL_REASONING_PREFERENCES.get(model_id)
+        if not prefs:
+            return
+        char_limit = prefs.get("reasoning_char_limit")
+        if not char_limit or not resp.reasoning_content:
+            return
+        if len(resp.reasoning_content) <= char_limit:
+            return
+        trimmed = resp.reasoning_content[:char_limit].rstrip()
+        resp.reasoning_content = f"{trimmed}…"
+
     async def get_response(
         self,
         model_info: ModelInfo,
@@ -543,10 +591,11 @@ class GeminiClient(BaseClient):
         # 将tool_options转换为Gemini API所需的格式
         tools = _convert_tool_options(tool_options) if tool_options else None
         # 解析并裁剪 thinking_budget
-        tb = self.clamp_thinking_budget(extra_params, model_info.model_identifier)
+        raw_model_identifier = model_info.model_identifier
+        tb = self.clamp_thinking_budget(extra_params, raw_model_identifier)
         # 检测是否为带 -search 的模型
         enable_google_search = False
-        model_identifier = model_info.model_identifier
+        model_identifier = raw_model_identifier
         if model_identifier.endswith("-search"):
             enable_google_search = True
             # 去掉后缀并更新模型ID
@@ -554,15 +603,14 @@ class GeminiClient(BaseClient):
             model_info.model_identifier = model_identifier
             logger.info(f"模型已启用 GoogleSearch 功能：{model_identifier}")
 
+        tb = self._apply_reasoning_budget_cap(tb, model_identifier)
+
         # 将response_format转换为Gemini API所需的格式
         generation_config_dict = {
             "max_output_tokens": max_tokens,
             "temperature": temperature,
             "response_modalities": ["TEXT"],
-            "thinking_config": ThinkingConfig(
-                include_thoughts=True,
-                thinking_budget=tb,
-            ),
+            "thinking_config": self._build_thinking_config(model_identifier, tb),
             "safety_settings": gemini_safe_settings,  # 防止空回复问题
         }
         if tools:
@@ -638,6 +686,10 @@ class GeminiClient(BaseClient):
             # 其他未预料的错误，才归为网络连接类
             raise NetworkConnectionError() from e
 
+        self._trim_reasoning_content(resp, model_identifier)
+
+        self._trim_reasoning_content(resp, raw_model_identifier)
+
         if usage_record:
             resp.usage = UsageRecord(
                 model_name=model_info.name,
@@ -707,7 +759,9 @@ class GeminiClient(BaseClient):
         :return: 转录响应
         """
         # 解析并裁剪 thinking_budget
-        tb = self.clamp_thinking_budget(extra_params, model_info.model_identifier)
+        raw_model_identifier = model_info.model_identifier
+        tb = self.clamp_thinking_budget(extra_params, raw_model_identifier)
+        tb = self._apply_reasoning_budget_cap(tb, raw_model_identifier)
 
         # 构造 prompt + 音频输入
         prompt = "Generate a transcript of the speech. The language of the transcript should **match the language of the speech**."
@@ -724,10 +778,7 @@ class GeminiClient(BaseClient):
         generation_config_dict = {
             "max_output_tokens": max_tokens,
             "response_modalities": ["TEXT"],
-            "thinking_config": ThinkingConfig(
-                include_thoughts=True,
-                thinking_budget=tb,
-            ),
+            "thinking_config": self._build_thinking_config(raw_model_identifier, tb),
             "safety_settings": gemini_safe_settings,
         }
         generate_content_config = GenerateContentConfig(**generation_config_dict)
