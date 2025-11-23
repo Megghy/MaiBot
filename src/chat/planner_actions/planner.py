@@ -368,8 +368,20 @@ class ActionPlanner:
             loop_start_time=loop_start_time,
         )
 
+        if actions:
+            action_reasons = []
+            for action in actions:
+                action_reason = action.reasoning or ""
+                if action_reason:
+                    action_reasons.append(f"{action.action_type}:{action_reason}")
+                else:
+                    action_reasons.append(f"{action.action_type}:（无reason）")
+            log_reasoning = " | ".join(action_reasons)
+        else:
+            log_reasoning = reasoning or "（无reason）"
+
         logger.info(
-            f"{self.log_prefix}Planner:{reasoning}。选择了{len(actions)}个动作: {' '.join([a.action_type for a in actions])}"
+            f"{self.log_prefix}Planner:{log_reasoning}。选择了{len(actions)}个动作: {' '.join([a.action_type for a in actions])}"
         )
 
         self.add_plan_log(reasoning, actions)
