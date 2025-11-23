@@ -61,6 +61,154 @@ SPECIAL_TOOL_DEFINITIONS = [
 ]
 
 
+def _truncate_text(text: str, limit: int = 160) -> str:
+    """对文本进行截断，避免日志或prompt过长"""
+
+    if not text:
+        return ""
+
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    ellipsis = "…"
+    keep = max(0, limit - len(ellipsis))
+    return text[:keep] + ellipsis
+
+
+def _format_action_repr(action: Dict[str, Any]) -> str:
+    action_type = action.get("action_type", "")
+    params = action.get("action_params") or {}
+    if not params:
+        return action_type
+
+    display_params = []
+    for key, value in params.items():
+        if key == "chat_id":
+            continue
+        value_str = _truncate_text(str(value), 40)
+        display_params.append(f"{key}={value_str}")
+
+    param_str = ", ".join(display_params)
+    return f"{action_type}({param_str})" if display_params else action_type
+
+
+def _format_agent_summary(thinking_steps: List[Dict[str, Any]], max_steps: int = 3) -> str:
+    if not thinking_steps:
+        return ""
+
+    summary_lines: List[str] = []
+    for step in thinking_steps[:max_steps]:
+        iteration = step.get("iteration")
+        line_parts = [f"第{iteration}轮"] if iteration is not None else []
+
+        reasoning = step.get("reasoning") or step.get("thought") or ""
+        if reasoning:
+            line_parts.append(f"思考：{_truncate_text(reasoning, 80)}")
+
+        actions = step.get("actions") or []
+        if actions:
+            action_text = "；".join(_format_action_repr(action) for action in actions)
+            line_parts.append(f"动作：{action_text}")
+
+        observations = step.get("observations") or []
+        if observations:
+            line_parts.append(f"观察：{_truncate_text(observations[0], 80)}")
+
+        summary_lines.append("；".join(line_parts))
+
+    if len(thinking_steps) > max_steps:
+        summary_lines.append("……")
+
+    return "\n".join(summary_lines)
+
+
+def _extract_answer_source(thinking_steps: List[Dict[str, Any]]) -> str:
+    for step in reversed(thinking_steps):
+        for action in step.get("actions", []):
+            if action.get("action_type") == "found_answer":
+                params = action.get("action_params") or {}
+                return params.get("source", "")
+    return ""
+
+
+def _describe_source(raw_source: Optional[str], *, from_cache: bool = False) -> str:
+    if from_cache:
+        return "历史缓存"
+
+    if not raw_source:
+        return "检索记忆"
+
+    mapping = {"memory": "检索记忆", "model": "模型常识"}
+    return mapping.get(raw_source, raw_source)
+
+
+def _build_answer_block(
+    question: str,
+    answer: str,
+    *,
+    source_label: str,
+    agent_summary: Optional[str] = None,
+    extra_note: Optional[str] = None,
+) -> str:
+    lines = [
+        f"问题：{question}",
+        f"答案：{answer}",
+    ]
+
+    if source_label:
+        lines.append(f"来源：{source_label}")
+
+    if extra_note:
+        lines.append(f"备注：{extra_note}")
+
+    if agent_summary:
+        lines.append("Agent步骤：")
+        lines.append(agent_summary)
+
+    return "\n".join(lines)
+
+
+def _load_thinking_steps(raw_steps: Optional[str]) -> List[Dict[str, Any]]:
+    if not raw_steps:
+        return []
+
+    try:
+        loaded = json.loads(raw_steps)
+        if isinstance(loaded, list):
+            return loaded
+    except Exception as exc:  # pragma: no cover - 防御性日志
+        logger.warning(f"解析thinking_steps失败: {exc}")
+    return []
+
+
+def _format_answer_payload(
+    question: str,
+    answer: str,
+    thinking_steps: Optional[List[Dict[str, Any]]] = None,
+    *,
+    from_cache: bool = False,
+    extra_note: Optional[str] = None,
+) -> str:
+    steps = thinking_steps or []
+    raw_source = _extract_answer_source(steps)
+    source_label = _describe_source(raw_source, from_cache=from_cache)
+    agent_summary = _format_agent_summary(steps)
+    return _build_answer_block(
+        question,
+        answer,
+        source_label=source_label,
+        agent_summary=agent_summary or None,
+        extra_note=extra_note,
+    )
+
+
+def _extract_question_from_block(block: str) -> Optional[str]:
+    for line in block.splitlines():
+        if line.startswith("问题："):
+            return line.replace("问题：", "", 1).strip()
+    return None
+
+
 def _cleanup_stale_not_found_thinking_back() -> None:
     """定期清理过期的未找到答案记录"""
     global _last_not_found_cleanup_ts
@@ -731,10 +879,20 @@ def _get_cached_memories(chat_id: str, time_window_seconds: float = 300.0) -> Li
         if not records.exists():
             return []
 
-        cached_memories = []
+        cached_memories: List[str] = []
         for record in records:
-            if record.answer:
-                cached_memories.append(f"问题：{record.question}\n答案：{record.answer}")
+            if not record.answer:
+                continue
+
+            thinking_steps = _load_thinking_steps(record.thinking_steps)
+            cached_memories.append(
+                _format_answer_payload(
+                    record.question,
+                    record.answer,
+                    thinking_steps,
+                    from_cache=True,
+                )
+            )
 
         return cached_memories
 
@@ -743,7 +901,7 @@ def _get_cached_memories(chat_id: str, time_window_seconds: float = 300.0) -> Li
         return []
 
 
-def _query_thinking_back(chat_id: str, question: str) -> Optional[Tuple[bool, str]]:
+def _query_thinking_back(chat_id: str, question: str) -> Optional[Tuple[bool, str, List[Dict[str, Any]]]]:
     """从thinking_back数据库中查询是否有现成的答案
 
     Args:
@@ -769,8 +927,9 @@ def _query_thinking_back(chat_id: str, question: str) -> Optional[Tuple[bool, st
             record = records.get()
             found_answer = bool(record.found_answer)
             answer = record.answer or ""
+            steps = _load_thinking_steps(record.thinking_steps)
             logger.info(f"在thinking_back中找到记录，问题: {question[:50]}...，found_answer: {found_answer}")
-            return found_answer, answer
+            return found_answer, answer, steps
 
         return None
 
@@ -953,7 +1112,7 @@ async def _process_single_question(question: str, chat_id: str, context: str, in
     should_requery = False
 
     if cached_result:
-        cached_found_answer, cached_answer = cached_result
+        cached_found_answer, cached_answer, cached_steps = cached_result
 
         if cached_found_answer:  # found_answer == 1 (True)
             # found_answer == 1：20%概率重新查询
@@ -963,7 +1122,12 @@ async def _process_single_question(question: str, chat_id: str, context: str, in
 
             if not should_requery and cached_answer:
                 logger.info(f"从thinking_back缓存中获取答案，问题: {question[:50]}...")
-                return f"问题：{question}\n答案：{cached_answer}"
+                return _format_answer_payload(
+                    question,
+                    cached_answer,
+                    cached_steps,
+                    from_cache=True,
+                )
             elif not cached_answer:
                 should_requery = True
                 logger.info(f"found_answer=1 但缓存答案为空，重新查询，问题: {question[:50]}...")
@@ -1003,7 +1167,11 @@ async def _process_single_question(question: str, chat_id: str, context: str, in
         if found_answer and answer:
             # 创建异步任务分析问题和答案
             asyncio.create_task(_analyze_question_answer(question, answer, chat_id))
-            return f"问题：{question}\n答案：{answer}"
+            return _format_answer_payload(
+                question,
+                answer,
+                thinking_steps,
+            )
 
     return None
 
@@ -1119,25 +1287,27 @@ async def build_memory_retrieval_prompt(
 
         # 收集所有有效结果
         all_results = []
-        current_questions = set()  # 用于去重，避免缓存和当次查询重复
+        current_questions: Set[str] = set()  # 用于去重，避免缓存和当次查询重复
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 logger.error(f"处理问题 '{questions[i]}' 时发生异常: {result}")
             elif result is not None:
                 all_results.append(result)
                 # 提取问题用于去重
-                if result.startswith("问题："):
-                    question = result.split("\n")[0].replace("问题：", "").strip()
-                    current_questions.add(question)
+                question_line = _extract_question_from_block(result)
+                if question_line:
+                    current_questions.add(question_line)
 
         # 将缓存的记忆添加到结果中（排除当次查询已包含的问题，避免重复）
         for cached_memory in cached_memories:
-            if cached_memory.startswith("问题："):
-                question = cached_memory.split("\n")[0].replace("问题：", "").strip()
-                # 只有当次查询中没有相同问题时，才添加缓存记忆
-                if question not in current_questions:
-                    all_results.append(cached_memory)
-                    logger.debug(f"添加缓存记忆: {question[:50]}...")
+            question_line = _extract_question_from_block(cached_memory)
+            if not question_line:
+                continue
+
+            # 只有当次查询中没有相同问题时，才添加缓存记忆
+            if question_line not in current_questions:
+                all_results.append(cached_memory)
+                logger.debug(f"添加缓存记忆: {question_line[:50]}...")
 
         end_time = time.time()
 

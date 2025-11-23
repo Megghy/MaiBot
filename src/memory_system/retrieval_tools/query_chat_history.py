@@ -4,14 +4,45 @@
 """
 
 import json
-from typing import Optional
+from datetime import datetime
+from typing import Optional, List, Dict, Any
 from src.common.logger import get_logger
 from src.common.database.database_model import ChatHistory
 from src.chat.utils.utils import parse_keywords_string
 from .tool_registry import register_memory_retrieval_tool
 from ..memory_utils import parse_datetime_to_timestamp, parse_time_range
+from .tool_utils import format_tool_response, truncate_text
 
 logger = get_logger("memory_retrieval_tools")
+
+
+def _build_record_payload(record: ChatHistory) -> Dict[str, Any]:
+    start_str = datetime.fromtimestamp(record.start_time).strftime("%Y-%m-%d %H:%M:%S")
+    end_str = datetime.fromtimestamp(record.end_time).strftime("%Y-%m-%d %H:%M:%S")
+    entry: Dict[str, Any] = {
+        "id": record.id,
+        "theme": record.theme or "",
+        "time": {"start": start_str, "end": end_str},
+        "start_timestamp": record.start_time,
+        "end_timestamp": record.end_time,
+        "match_count": record.count or 0,
+    }
+
+    summary = record.summary or ""
+    if summary:
+        entry["summary"] = summary
+    elif record.original_text:
+        entry["summary"] = truncate_text(record.original_text, 200)
+
+    if record.keywords:
+        try:
+            parsed_keywords = json.loads(record.keywords) if isinstance(record.keywords, str) else record.keywords
+            if isinstance(parsed_keywords, list):
+                entry["keywords"] = [str(k) for k in parsed_keywords]
+        except (json.JSONDecodeError, TypeError, ValueError):
+            entry["keywords_raw"] = truncate_text(record.keywords, 120)
+
+    return entry
 
 
 async def query_chat_history(
@@ -35,7 +66,11 @@ async def query_chat_history(
     try:
         # 检查参数
         if not keyword and not time_range:
-            return "未指定查询参数（需要提供keyword或time_range之一）"
+            return format_tool_response(
+                False,
+                "未指定查询参数（需要提供keyword或time_range之一）",
+                {"hint": "传入keyword或time_range其中之一"},
+            )
 
         # 构建查询条件
         query = ChatHistory.select().where(ChatHistory.chat_id == chat_id)
@@ -68,7 +103,7 @@ async def query_chat_history(
             keywords_lower = [kw.lower() for kw in keywords_list if kw.strip()]
 
             if not keywords_lower:
-                return "关键词为空"
+                return format_tool_response(False, "关键词为空", {"keyword": keyword})
 
             filtered_records = []
 
@@ -123,19 +158,22 @@ async def query_chat_history(
             if not filtered_records:
                 keywords_str = "、".join(keywords_list)
                 match_mode = "包含任意一个关键词" if fuzzy else "包含所有关键词"
-                if time_range:
-                    return f"未找到{match_mode}'{keywords_str}'且在指定时间范围内的聊天记录概述"
-                else:
-                    return f"未找到{match_mode}'{keywords_str}'的聊天记录概述"
+                return format_tool_response(
+                    False,
+                    f"未找到{match_mode}'{keywords_str}'的聊天记录概述",
+                    {
+                        "keyword": keywords_list,
+                        "time_range": time_range,
+                        "match_mode": "fuzzy" if fuzzy else "strict",
+                    },
+                )
 
             records = filtered_records
 
         # 如果没有记录（可能是时间范围查询但没有匹配的记录）
         if not records:
-            if time_range:
-                return "未找到指定时间范围内的聊天记录概述"
-            else:
-                return "未找到相关聊天记录概述"
+            message = "未找到指定时间范围内的聊天记录概述" if time_range else "未找到相关聊天记录概述"
+            return format_tool_response(False, message, {"time_range": time_range})
 
         # 对即将返回的记录增加使用计数
         records_to_use = records[:3]
@@ -147,44 +185,30 @@ async def query_chat_history(
                 logger.error(f"更新聊天记录概述计数失败: {update_error}")
 
         # 构建结果文本
-        results = []
-        for record in records_to_use:  # 最多返回3条记录
-            result_parts = []
+        record_entries: List[Dict[str, Any]] = [_build_record_payload(record) for record in records_to_use]
 
-            # 添加主题
-            if record.theme:
-                result_parts.append(f"主题：{record.theme}")
+        omitted_count = max(0, len(records) - len(records_to_use))
+        message_suffix = f"，另有{omitted_count}条已省略" if omitted_count else ""
+        msg = f"找到{len(record_entries)}条聊天记录概述{message_suffix}"
 
-            # 添加时间范围
-            from datetime import datetime
-
-            start_str = datetime.fromtimestamp(record.start_time).strftime("%Y-%m-%d %H:%M:%S")
-            end_str = datetime.fromtimestamp(record.end_time).strftime("%Y-%m-%d %H:%M:%S")
-            result_parts.append(f"时间：{start_str} - {end_str}")
-
-            # 添加概括（优先使用summary，如果没有则使用original_text的前200字符）
-            if record.summary:
-                result_parts.append(f"概括：{record.summary}")
-            elif record.original_text:
-                text_preview = record.original_text[:200]
-                if len(record.original_text) > 200:
-                    text_preview += "..."
-                result_parts.append(f"内容：{text_preview}")
-
-            results.append("\n".join(result_parts))
-
-        if not results:
-            return "未找到相关聊天记录概述"
-
-        response_text = "\n\n---\n\n".join(results)
-        if len(records) > len(records_to_use):
-            omitted_count = len(records) - len(records_to_use)
-            response_text += f"\n\n(还有{omitted_count}条历史记录已省略)"
-        return response_text
+        return format_tool_response(
+            True,
+            msg,
+            {
+                "records": record_entries,
+                "total_found": len(records),
+                "omitted": omitted_count,
+                "filters": {
+                    "keyword": keyword,
+                    "time_range": time_range,
+                    "match_mode": "fuzzy" if fuzzy else "strict",
+                },
+            },
+        )
 
     except Exception as e:
         logger.error(f"查询聊天历史概述失败: {e}")
-        return f"查询失败: {str(e)}"
+        return format_tool_response(False, f"查询失败: {str(e)}")
 
 
 def register_tool():

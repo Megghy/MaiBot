@@ -172,7 +172,7 @@ class ActionPlanner:
             "description": "回复一条消息. 当你想回应用户或聊天上下文时使用此项.",
             "parameters": [
                 ("target_message_id", ToolParamType.STRING, "你回复的消息的ID (m+数字)", True, None),
-                ("reason", ToolParamType.STRING, "回复的原因", True, None)
+                ("reason", ToolParamType.STRING, "回复的原因, 用简短的语句说明", True, None)
             ]
         })
         
@@ -181,7 +181,7 @@ class ActionPlanner:
             "name": "no_reply",
             "description": "不回复. 当你想保持沉默时使用此项.",
             "parameters": [
-                ("reason", ToolParamType.STRING, "不回复的原因", True, None)
+                ("reason", ToolParamType.STRING, "不回复的原因, 用简短的语句说明", True, None)
             ]
         })
 
@@ -191,7 +191,7 @@ class ActionPlanner:
             "description": "在下一个动作之前等待一段时间.",
             "parameters": [
                 ("duration", ToolParamType.INTEGER, "等待的持续时间 (秒)", True, None),
-                ("reason", ToolParamType.STRING, "等待的原因", True, None)
+                ("reason", ToolParamType.STRING, "等待的原因, 用简短的语句说明", True, None)
             ]
         })
 
@@ -200,7 +200,7 @@ class ActionPlanner:
             "name": "no_reply_until_call",
             "description": "保持沉默直到被指名道姓地呼叫.",
             "parameters": [
-                ("reason", ToolParamType.STRING, "进入此模式的原因", True, None)
+                ("reason", ToolParamType.STRING, "进入此模式的原因, 用简短的语句说明", True, None)
             ]
         })
 

@@ -5,6 +5,7 @@
 from src.common.logger import get_logger
 from src.jargon.jargon_miner import search_jargon
 from .tool_registry import register_memory_retrieval_tool
+from .tool_utils import format_tool_response
 
 logger = get_logger("memory_retrieval_tools")
 
@@ -22,7 +23,7 @@ async def query_jargon(keyword: str, chat_id: str) -> str:
     try:
         content = str(keyword).strip()
         if not content:
-            return "关键词为空"
+            return format_tool_response(False, "关键词为空")
 
         # 先尝试精确匹配
         results = search_jargon(keyword=content, chat_id=chat_id, limit=10, case_sensitive=False, fuzzy=False)
@@ -35,35 +36,32 @@ async def query_jargon(keyword: str, chat_id: str) -> str:
             is_fuzzy_match = True
 
         if results:
-            # 如果是模糊匹配，显示找到的实际jargon内容
-            if is_fuzzy_match:
-                # 处理多个结果
-                output_parts = [f"未精确匹配到'{content}'"]
-                for result in results:
-                    found_content = result.get("content", "").strip()
-                    meaning = result.get("meaning", "").strip()
-                    if found_content and meaning:
-                        output_parts.append(f"找到 '{found_content}' 的含义为：{meaning}")
-                output = "，".join(output_parts)
-                logger.info(f"在jargon库中找到匹配（当前会话或全局，模糊搜索）: {content}，找到{len(results)}条结果")
-            else:
-                # 精确匹配，可能有多条（相同content但不同chat_id的情况）
-                output_parts = []
-                for result in results:
-                    meaning = result.get("meaning", "").strip()
-                    if meaning:
-                        output_parts.append(f"'{content}' 为黑话或者网络简写，含义为：{meaning}")
-                output = "；".join(output_parts) if len(output_parts) > 1 else output_parts[0]
-                logger.info(f"在jargon库中找到匹配（当前会话或全局，精确匹配）: {content}，找到{len(results)}条结果")
-            return output
+            normalized = []
+            for result in results:
+                normalized.append(
+                    {
+                        "content": result.get("content", "").strip(),
+                        "meaning": result.get("meaning", "").strip(),
+                    }
+                )
+
+            return format_tool_response(
+                True,
+                "在jargon库中找到匹配",
+                {
+                    "keyword": content,
+                    "results": normalized,
+                    "match_mode": "fuzzy" if is_fuzzy_match else "exact",
+                },
+            )
 
         # 未命中
         logger.info(f"在jargon库中未找到匹配（当前会话或全局，精确匹配和模糊搜索都未找到）: {content}")
-        return f"未在jargon库中找到'{content}'的解释"
+        return format_tool_response(False, f"未在jargon库中找到'{content}'的解释", {"keyword": content})
 
     except Exception as e:
         logger.error(f"查询jargon失败: {e}")
-        return f"查询失败: {str(e)}"
+        return format_tool_response(False, f"查询失败: {str(e)}")
 
 
 def register_tool():

@@ -6,7 +6,7 @@ import random
 import math
 
 from json_repair import repair_json
-from typing import Union, Optional
+from typing import Union, Optional, Callable
 
 from src.common.logger import get_logger
 from src.common.database.database import db
@@ -21,6 +21,39 @@ logger = get_logger("person_info")
 relation_selection_model = LLMRequest(
     model_set=model_config.model_task_config.utils_small, request_type="relation_selection"
 )
+
+DEFAULT_MEMORY_CATEGORY = "其他"
+MAX_MEMORY_POINTS = 200
+MAX_MEMORY_POINTS_PER_CATEGORY = 30
+MEMORY_SIMILARITY_THRESHOLD = 0.9
+CATEGORY_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
+    ("喜好", ("喜欢", "爱吃", "偏好", "最爱", "爱喝", "爱看")),
+    ("经历", ("经历", "发生", "去了", "参加", "上次", "以前")),
+    ("性格", ("性格", "脾气", "内向", "外向", "自信", "害羞")),
+    ("能力", ("擅长", "会", "技能", "专业", "懂", "熟悉")),
+]
+
+
+def _normalize_category(category: str) -> str:
+    category = (category or "").strip()
+    return category if category else DEFAULT_MEMORY_CATEGORY
+
+
+def _normalize_weight(weight: float) -> float:
+    try:
+        value = float(weight)
+    except (TypeError, ValueError):
+        value = 1.0
+    return round(min(max(value, 0.1), 5.0), 2)
+
+
+def infer_memory_category(memory_content: str) -> str:
+    memory_content = (memory_content or "").strip()
+    lowered = memory_content.lower()
+    for category, keywords in CATEGORY_KEYWORDS:
+        if any(keyword.lower() in lowered for keyword in keywords):
+            return category
+    return DEFAULT_MEMORY_CATEGORY
 
 
 def get_person_id(platform: str, user_id: Union[int, str]) -> str:
@@ -39,6 +72,28 @@ def get_person_id_by_person_name(person_name: str) -> str:
         return record.person_id if record else ""
     except Exception as e:
         logger.error(f"根据用户名 {person_name} 获取用户ID时出错 (Peewee): {e}")
+        return ""
+
+
+def get_person_id_by_alias(alias: str) -> str:
+    """根据昵称/群名片等别名获取用户ID"""
+    alias = (alias or "").strip()
+    if not alias:
+        return ""
+
+    try:
+        record = PersonInfo.get_or_none(
+            (PersonInfo.person_name == alias) | (PersonInfo.nickname == alias)
+        )
+        if record:
+            return record.person_id
+
+        record = PersonInfo.get_or_none(
+            (PersonInfo.group_nick_name.is_null(False)) & (PersonInfo.group_nick_name.contains(alias))
+        )
+        return record.person_id if record else ""
+    except Exception as e:
+        logger.error(f"根据别名 {alias} 获取用户ID时出错 (Peewee): {e}")
         return ""
 
 
@@ -337,6 +392,98 @@ class Person:
             logger.info(f"成功删除 {deleted_count} 个记忆点，分类: {category}")
 
         return deleted_count
+
+    def _ensure_memory_points_initialized(self):
+        if not isinstance(self.memory_points, list):
+            self.memory_points = []
+
+    def _compact_memory_points(self):
+        self._ensure_memory_points_initialized()
+        valid_points = [point for point in self.memory_points if isinstance(point, str) and point.strip()]
+        if len(valid_points) != len(self.memory_points):
+            self.memory_points = valid_points
+
+    def _remove_lowest_weight_point(self, *, predicate: Optional[Callable[[str], bool]] = None):
+        if not self.memory_points:
+            return
+
+        predicate = predicate or (lambda _p: True)
+        lowest_idx = None
+        lowest_weight = math.inf
+
+        for idx, point in enumerate(self.memory_points):
+            if not isinstance(point, str) or not predicate(point):
+                continue
+            weight = get_weight_from_memory(point)
+            if weight < lowest_weight:
+                lowest_weight = weight
+                lowest_idx = idx
+
+        if lowest_idx is not None:
+            removed_point = self.memory_points.pop(lowest_idx)
+            logger.debug(f"移除记忆点以腾出空间: {removed_point}")
+
+    def _ensure_memory_capacity(self, category: str):
+        self._compact_memory_points()
+
+        category_points = [point for point in self.memory_points if get_category_from_memory(point) == category]
+        if len(category_points) >= MAX_MEMORY_POINTS_PER_CATEGORY:
+            self._remove_lowest_weight_point(predicate=lambda p: get_category_from_memory(p) == category)
+
+        if len(self.memory_points) >= MAX_MEMORY_POINTS:
+            self._remove_lowest_weight_point()
+
+    def add_memory_point(
+        self,
+        memory_content: str,
+        *,
+        category: Optional[str] = None,
+        weight: float = 1.0,
+        similarity_fn: Optional[Callable[[str, str], float]] = None,
+    ) -> bool:
+        if not self.is_known:
+            logger.debug(f"用户 {self.person_id} 尚未被标记为已认识，无法添加记忆")
+            return False
+
+        memory_content = (memory_content or "").strip()
+        if not memory_content:
+            return False
+
+        similarity_fn = similarity_fn or calculate_string_similarity
+        category = _normalize_category(category or infer_memory_category(memory_content))
+        weight_value = _normalize_weight(weight)
+
+        self._compact_memory_points()
+
+        duplicate_idx = None
+        for idx, point in enumerate(self.memory_points):
+            if not isinstance(point, str):
+                continue
+            point_category = get_category_from_memory(point)
+            if point_category != category:
+                continue
+            existing_content = get_memory_content_from_memory(point)
+            similarity = similarity_fn(existing_content, memory_content)
+            if similarity >= MEMORY_SIMILARITY_THRESHOLD:
+                duplicate_idx = idx
+                break
+
+        if duplicate_idx is not None:
+            existing_point = self.memory_points[duplicate_idx]
+            merged_weight = _normalize_weight(
+                (get_weight_from_memory(existing_point) + weight_value) / 2 + 0.05
+            )
+            updated_point = f"{category}:{memory_content}:{merged_weight}"
+            self.memory_points[duplicate_idx] = updated_point
+            logger.debug(f"更新已存在的记忆点: {updated_point}")
+        else:
+            self._ensure_memory_capacity(category)
+            new_point = f"{category}:{memory_content}:{weight_value}"
+            self.memory_points.append(new_point)
+            logger.debug(f"新增记忆点: {new_point}")
+
+        self.sync_to_database()
+        return True
 
     def get_all_category(self):
         category_list = []
@@ -783,67 +930,45 @@ async def store_person_memory_from_answer(person_name: str, memory_content: str,
         chat_id: 聊天ID
     """
     try:
-        # 从chat_id获取chat_stream
+        person_name = (person_name or "").strip()
+        memory_content = (memory_content or "").strip()
+
+        if not person_name or not memory_content:
+            logger.debug("人物名称或记忆内容为空，跳过存储")
+            return
+
         chat_stream = get_chat_manager().get_stream(chat_id)
         if not chat_stream:
             logger.warning(f"无法获取chat_stream for chat_id: {chat_id}")
             return
 
         platform = chat_stream.platform
-
-        # 尝试从person_name查找person_id
-        # 首先尝试通过person_name查找
         person_id = get_person_id_by_person_name(person_name)
+        if not person_id:
+            person_id = get_person_id_by_alias(person_name)
+
+        if not person_id and chat_stream.user_info:
+            user_nickname = (chat_stream.user_info.user_nickname or "").strip()
+            if user_nickname and user_nickname == person_name:
+                person_id = get_person_id(platform, chat_stream.user_info.user_id)
 
         if not person_id:
-            # 如果通过person_name找不到，尝试从chat_stream获取user_info
-            if chat_stream.user_info:
-                user_id = chat_stream.user_info.user_id
-                person_id = get_person_id(platform, user_id)
-            else:
-                logger.warning(f"无法确定person_id for person_name: {person_name}, chat_id: {chat_id}")
-                return
+            logger.warning(f"无法确定person_id，person_name: {person_name}, chat_id: {chat_id}")
+            return
 
-        # 创建或获取Person对象
         person = Person(person_id=person_id)
 
         if not person.is_known:
             logger.warning(f"用户 {person_name} (person_id: {person_id}) 尚未认识，无法存储记忆")
             return
 
-        # 确定记忆分类（可以根据memory_content判断，这里使用通用分类）
-        category = "其他"  # 默认分类，可以根据需要调整
+        category = infer_memory_category(memory_content)
+        added = person.add_memory_point(memory_content, category=category, weight=1.0)
 
-        # 记忆点格式：category:content:weight
-        weight = "1.0"  # 默认权重
-        memory_point = f"{category}:{memory_content}:{weight}"
-
-        # 添加到memory_points
-        if not person.memory_points:
-            person.memory_points = []
-
-        # 检查是否已存在相似的记忆点（避免重复）
-        is_duplicate = False
-        for existing_point in person.memory_points:
-            if existing_point and isinstance(existing_point, str):
-                parts = existing_point.split(":", 2)
-                if len(parts) >= 2:
-                    existing_content = parts[1].strip()
-                    # 简单相似度检查（如果内容相同或非常相似，则跳过）
-                    if (
-                        existing_content == memory_content
-                        or memory_content in existing_content
-                        or existing_content in memory_content
-                    ):
-                        is_duplicate = True
-                        break
-
-        if not is_duplicate:
-            person.memory_points.append(memory_point)
-            person.sync_to_database()
-            logger.info(f"成功添加记忆点到 {person_name} (person_id: {person_id}): {memory_point}")
+        if added:
+            logger.info(f"成功添加人物记忆：{person_name} -> {memory_content}")
         else:
-            logger.debug(f"记忆点已存在，跳过: {memory_point}")
+            logger.debug(f"未能添加人物记忆（可能重复）：{person_name} -> {memory_content}")
 
     except Exception as e:
         logger.error(f"存储人物记忆失败: {e}")

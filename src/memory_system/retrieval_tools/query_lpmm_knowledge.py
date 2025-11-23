@@ -6,6 +6,7 @@ from src.common.logger import get_logger
 from src.config.config import global_config
 from src.chat.knowledge import get_qa_manager
 from .tool_registry import register_memory_retrieval_tool
+from .tool_utils import format_tool_response
 
 logger = get_logger("memory_retrieval_tools")
 
@@ -22,7 +23,7 @@ async def query_lpmm_knowledge(query: str, limit: int = 5) -> str:
     try:
         content = str(query).strip()
         if not content:
-            return "查询关键词为空"
+            return format_tool_response(False, "查询关键词为空")
 
         try:
             limit_value = int(limit)
@@ -32,24 +33,32 @@ async def query_lpmm_knowledge(query: str, limit: int = 5) -> str:
 
         if not global_config.lpmm_knowledge.enable:
             logger.debug("LPMM知识库未启用")
-            return "LPMM知识库未启用"
+            return format_tool_response(False, "LPMM知识库未启用")
 
         qa_manager = get_qa_manager()
         if qa_manager is None:
             logger.debug("LPMM知识库未初始化，跳过查询")
-            return "LPMM知识库未初始化"
+            return format_tool_response(False, "LPMM知识库未初始化")
 
         knowledge_info = await qa_manager.get_knowledge(content, limit=limit_value)
         logger.debug(f"LPMM知识库查询结果: {knowledge_info}")
 
         if knowledge_info:
-            return f"你从LPMM知识库中找到以下信息：\n{knowledge_info}"
+            return format_tool_response(
+                True,
+                "你从LPMM知识库中找到以下信息",
+                {"query": content, "result": knowledge_info, "limit": limit_value},
+            )
 
-        return f"在LPMM知识库中未找到与“{content}”相关的信息"
+        return format_tool_response(
+            False,
+            f"在LPMM知识库中未找到与“{content}”相关的信息",
+            {"query": content},
+        )
 
     except Exception as e:
         logger.error(f"LPMM知识库查询失败: {e}")
-        return f"LPMM知识库查询失败：{str(e)}"
+        return format_tool_response(False, f"LPMM知识库查询失败：{str(e)}")
 
 
 def register_tool():
