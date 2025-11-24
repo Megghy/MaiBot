@@ -41,6 +41,9 @@ class HeartFCMessageReceiver:
         try:
             # 1. 消息解析与初始化
             userinfo = message.message_info.user_info
+            user_nickname = userinfo.user_nickname if userinfo else "未知用户"
+            user_cardname = userinfo.user_cardname if userinfo else None
+            user_id = userinfo.user_id if userinfo else None
             chat = message.chat_stream
 
             # 2. 计算at信息
@@ -82,22 +85,23 @@ class HeartFCMessageReceiver:
             # if not processed_plain_text:
             # print(message)
 
-            logger.info(f"[{mes_name}]{userinfo.user_nickname}:{processed_plain_text}")  # type: ignore
+            logger.info(f"[{mes_name}]{user_nickname}:{processed_plain_text}")
 
             # 如果是群聊，获取群号和群昵称
             group_id = None
             group_nick_name = None
             if chat.group_info:
                 group_id = chat.group_info.group_id  # type: ignore
-                group_nick_name = userinfo.user_cardname  # type: ignore
+                group_nick_name = user_cardname
 
-            _ = Person.register_person(
-                platform=message.message_info.platform,  # type: ignore
-                user_id=message.message_info.user_info.user_id,  # type: ignore
-                nickname=userinfo.user_nickname,  # type: ignore
-                group_id=group_id,
-                group_nick_name=group_nick_name,
-            )
+            if user_id and user_nickname:
+                _ = Person.register_person(
+                    platform=message.message_info.platform,  # type: ignore
+                    user_id=user_id,
+                    nickname=user_nickname,
+                    group_id=group_id,
+                    group_nick_name=group_nick_name,
+                )
 
         except Exception as e:
             logger.error(f"消息处理失败: {e}")

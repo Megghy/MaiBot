@@ -86,7 +86,8 @@ class MessageStorage:
                 selected_expressions = ""
 
             chat_info_dict = chat_stream.to_dict()
-            user_info_dict = message.message_info.user_info.to_dict()  # type: ignore
+            user_info = message.message_info.user_info  # type: ignore
+            user_info_dict = user_info.to_dict() if user_info else {}
 
             # message_id 现在是 TextField，直接使用字符串值
             msg_id = message.message_info.message_id

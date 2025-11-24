@@ -38,7 +38,7 @@ def init_prompt():
 {name_block}
 你的兴趣是: {interest}
 {chat_context_description}, 以下是具体的聊天内容
-**聊天内容**
+**Chat Content**
 {chat_content_block}
 
 **Action Records**
@@ -46,12 +46,12 @@ def init_prompt():
 
 请选择一个合适的 action.
 首先, 思考你的选择理由, 然后使用 tool calls 来执行 action.
+
 **Action Selection Requirements**
-请根据聊天内容, 用户的最新消息和以下标准选择合适的 action:
 {plan_style}
 {moderation_prompt}
 
-请使用 Tool Calls 来执行 actions. 你可以同时调用多个 tools.
+请使用 Tool Calls 来执行 actions.
 """,
         "planner_prompt",
     )
