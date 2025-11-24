@@ -37,6 +37,8 @@ def init_prompt():
     Prompt(
         """
 {time_block}
+{name_block}
+你的兴趣是: {interest}
 {chat_context_description}, 以下是具体的聊天内容
 **聊天内容**
 {chat_content_block}
@@ -45,6 +47,12 @@ def init_prompt():
 {actions_before_now_block}
 
 请选择一个合适的 action.
+首先, 思考你的选择理由, 然后使用 tool calls 来执行 action.
+**Action Selection Requirements**
+请根据聊天内容, 用户的最新消息和以下标准选择合适的 action:
+{plan_style}
+{moderation_prompt}
+
 ⚠️ 只允许通过 Tool Calls 返回你的决定, 请勿输出 JSON、自然语言总结或其他自由文本。
 如果不需要执行任何动作, 请调用 `no_reply` 工具并说明原因。
 """,

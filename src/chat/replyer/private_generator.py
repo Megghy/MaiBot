@@ -548,7 +548,7 @@ class PrivateReplyer:
             prompt_personality = selected_state
 
         prompt_personality = f"{prompt_personality};"
-        return f"你{prompt_personality}"
+        return f"你的名字是{bot_name}{bot_nickname}，你{prompt_personality}"
 
     def _parse_chat_prompt_config_to_chat_id(self, chat_prompt_str: str) -> Optional[tuple[str, str]]:
         """

@@ -35,6 +35,8 @@ def init_prompt():
     Prompt(
         """
 {time_block}
+{name_block}
+你的兴趣是: {interest}
 {chat_context_description}, 以下是具体的聊天内容
 **Chat Content**
 {chat_content_block}
@@ -42,17 +44,23 @@ def init_prompt():
 **Action Records**
 {actions_before_now_block}
 
-**Available Actions**
-{action_options_text}
-{no_reply_until_call_block}
-
 请选择一个合适的 action.
+**Critial Instruction**: 
+在调用工具前, 你必须先在心中回答: **"最新这条消息是发给谁的?"** (参考 Context 中的对话流向). 
+不要默认消息是发给你的, 只有当你确信需要回应时才行动.
+
+**Action Selection Requirements**
+{plan_style}
+{moderation_prompt}
+
+请使用 Tool Calls 来执行 actions.
 """,
         "planner_prompt",
     )
 
     Prompt(
         """{time_block}
+{name_block}
 {chat_context_description}, 以下是具体的聊天内容
 **聊天内容**
 {chat_content_block}
@@ -60,15 +68,15 @@ def init_prompt():
 **Action Records**
 {actions_before_now_block}
 
-**Available Actions**
-{action_options_text}
-
 请选择一个合适的 action.
 首先, 思考你的选择理由, 然后使用 tool calls 来执行 action.
 **Action Selection Requirements**
 请根据聊天内容, 用户的最新消息和以下标准选择合适的 action:
 1. 思考**所有**的可用的 action 中的**每个动作**是否符合当下条件, 如果动作使用条件符合聊天内容就使用
 2. 如果相同的内容已经被执行, 请不要重复执行
+{moderation_prompt}
+
+请使用 Tool Calls 来执行 actions. 你可以同时调用多个 tools.
 """,
         "planner_prompt_mentioned",
     )
@@ -531,6 +539,7 @@ class ActionPlanner:
 保持沉默，直到有人直接叫你的名字
 当前话题不感兴趣时使用，或有人不喜欢你的发言时使用
 当你频繁选择no_reply时使用，表示话题暂时与你无关
+{{"action":"no_reply_until_call"}}
 """
 
                 planner_prompt_template = await global_prompt_manager.get_prompt_async("planner_prompt")
