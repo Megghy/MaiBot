@@ -30,12 +30,16 @@ def build_person_memory_block(person: Optional[Person], group_id: Optional[str] 
     if not memory_points:
         return ""
 
+    # 记忆优先按权重排序，保证更重要的信息排前
+    sorted_points = sorted(
+        [point for point in memory_points if point],
+        key=lambda p: (get_category_from_memory(p) or "", -get_weight_from_memory(p)),
+    )
+
     entries: List[str] = []
-    for point in memory_points:
-        if not isinstance(point, str):
-            continue
+    for point in sorted_points:
         category = get_category_from_memory(point) or "记忆"
-        content = get_memory_content_from_memory(point) or point
+        content = get_memory_content_from_memory(point) or ""
         content = content.strip()
         if not content:
             continue

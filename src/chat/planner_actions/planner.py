@@ -42,6 +42,10 @@ def init_prompt():
 **Action Records**
 {actions_before_now_block}
 
+**Available Actions**
+{action_options_text}
+{no_reply_until_call_block}
+
 请选择一个合适的 action.
 """,
         "planner_prompt",
@@ -55,6 +59,9 @@ def init_prompt():
 
 **Action Records**
 {actions_before_now_block}
+
+**Available Actions**
+{action_options_text}
 
 请选择一个合适的 action.
 首先, 思考你的选择理由, 然后使用 tool calls 来执行 action.
@@ -524,7 +531,6 @@ class ActionPlanner:
 保持沉默，直到有人直接叫你的名字
 当前话题不感兴趣时使用，或有人不喜欢你的发言时使用
 当你频繁选择no_reply时使用，表示话题暂时与你无关
-{{"action":"no_reply_until_call"}}
 """
 
                 planner_prompt_template = await global_prompt_manager.get_prompt_async("planner_prompt")

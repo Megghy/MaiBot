@@ -6,7 +6,7 @@ import random
 import math
 
 from json_repair import repair_json
-from typing import Union, Optional, Callable, List
+from typing import Any, Iterable, List, Optional, TypedDict, Union, Callable
 
 from src.common.logger import get_logger
 from src.common.database.database import db
@@ -26,6 +26,29 @@ DEFAULT_MEMORY_CATEGORY = "其他"
 MAX_MEMORY_POINTS = 200
 MAX_MEMORY_POINTS_PER_CATEGORY = 30
 MEMORY_SIMILARITY_THRESHOLD = 0.9
+MEMORY_MIN_WEIGHT = 0.05
+MEMORY_MAX_WEIGHT = 5.0
+MEMORY_DECAY_GRACE_SECONDS = 6 * 60 * 60  # 6 hours
+MEMORY_DECAY_TIMESPAN = 14 * 24 * 60 * 60  # 14 days
+MEMORY_RECENCY_TIMESPAN = 7 * 24 * 60 * 60   # 7 days
+MEMORY_FORGET_THRESHOLD = 0.15
+MEMORY_HARD_FORGET_SECONDS = 180 * 24 * 60 * 60  # ~6 months
+
+
+class MemoryPointDict(TypedDict, total=False):
+    category: str
+    content: str
+    weight: float
+    created_at: float
+    updated_at: float
+    last_used_at: float
+    hits: int
+    source: Optional[str]
+    context: Optional[str]
+
+
+def _current_timestamp() -> float:
+    return time.time()
 CATEGORY_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
     ("喜好", ("喜欢", "爱吃", "偏好", "最爱", "爱喝", "爱看")),
     ("经历", ("经历", "发生", "去了", "参加", "上次", "以前")),
@@ -39,12 +62,127 @@ def _normalize_category(category: str) -> str:
     return category if category else DEFAULT_MEMORY_CATEGORY
 
 
-def _normalize_weight(weight: float) -> float:
+def _normalize_weight(weight: float | None) -> float:
     try:
         value = float(weight)
     except (TypeError, ValueError):
         value = 1.0
-    return round(min(max(value, 0.1), 5.0), 2)
+    return round(min(max(value, MEMORY_MIN_WEIGHT), MEMORY_MAX_WEIGHT), 2)
+
+
+def _legacy_memory_to_dict(memory_point: str) -> Optional[MemoryPointDict]:
+    if not isinstance(memory_point, str):
+        return None
+    parts = memory_point.split(":")
+    if len(parts) < 3:
+        return None
+    category = _normalize_category(parts[0])
+    content = ":".join(parts[1:-1]).strip()
+    if not content:
+        return None
+    now = _current_timestamp()
+    weight = _normalize_weight(parts[-1])
+    return MemoryPointDict(
+        category=category,
+        content=content,
+        weight=weight,
+        created_at=now,
+        updated_at=now,
+        last_used_at=now,
+        hits=1,
+    )
+
+
+def _normalize_memory_dict(memory_point: Any) -> Optional[MemoryPointDict]:
+    if isinstance(memory_point, dict):
+        now = _current_timestamp()
+        category = _normalize_category(memory_point.get("category", ""))
+        content = (memory_point.get("content") or "").strip()
+        if not content:
+            return None
+        normalized = MemoryPointDict(
+            category=category,
+            content=content,
+            weight=_normalize_weight(memory_point.get("weight")),
+            created_at=float(memory_point.get("created_at") or now),
+            updated_at=float(memory_point.get("updated_at") or now),
+            last_used_at=float(memory_point.get("last_used_at") or memory_point.get("created_at") or now),
+            hits=int(memory_point.get("hits") or 1),
+        )
+        source = memory_point.get("source")
+        context = memory_point.get("context")
+        if source:
+            normalized["source"] = str(source)
+        if context:
+            normalized["context"] = str(context)
+        return normalized
+    if isinstance(memory_point, str):
+        return _legacy_memory_to_dict(memory_point)
+    return None
+
+
+def _apply_memory_decay(memory_point: MemoryPointDict, now: Optional[float] = None) -> None:
+    if not memory_point:
+        return
+    now = now or _current_timestamp()
+    last_used = memory_point.get("last_used_at") or memory_point.get("updated_at") or memory_point.get("created_at") or now
+    elapsed = max(0.0, now - last_used)
+    if elapsed <= MEMORY_DECAY_GRACE_SECONDS:
+        return
+    decay_factor = math.exp(-elapsed / MEMORY_DECAY_TIMESPAN)
+    memory_point["weight"] = max(MEMORY_MIN_WEIGHT, round(memory_point.get("weight", 1.0) * decay_factor, 4))
+    memory_point["updated_at"] = now
+
+
+def _should_forget_memory(memory_point: MemoryPointDict, now: Optional[float] = None) -> bool:
+    now = now or _current_timestamp()
+    last_used = memory_point.get("last_used_at") or memory_point.get("updated_at") or memory_point.get("created_at") or now
+    age_since_use = now - last_used
+    age_since_create = now - (memory_point.get("created_at") or now)
+    if memory_point.get("weight", 0.0) <= MEMORY_FORGET_THRESHOLD and age_since_use > MEMORY_DECAY_GRACE_SECONDS:
+        return True
+    if age_since_create > MEMORY_HARD_FORGET_SECONDS:
+        return True
+    return False
+
+
+def _sanitize_memory_points(memory_points: Iterable[Any]) -> List[MemoryPointDict]:
+    now = _current_timestamp()
+    sanitized: List[MemoryPointDict] = []
+    for point in memory_points:
+        normalized = _normalize_memory_dict(point)
+        if not normalized:
+            continue
+        _apply_memory_decay(normalized, now=now)
+        if _should_forget_memory(normalized, now=now):
+            continue
+        sanitized.append(normalized)
+    return sanitized
+
+
+def _memory_to_log_string(memory_point: MemoryPointDict) -> str:
+    category = memory_point.get("category") or DEFAULT_MEMORY_CATEGORY
+    content = memory_point.get("content") or ""
+    weight = memory_point.get("weight", 0.0)
+    return f"{category}:{content}:{weight:.2f}"
+
+
+def _remove_lowest_weight_entry(
+    memory_points: List[MemoryPointDict], *, predicate: Optional[Callable[[MemoryPointDict], bool]] = None
+) -> Optional[MemoryPointDict]:
+    predicate = predicate or (lambda _p: True)
+    lowest_idx = None
+    lowest_weight = math.inf
+    for idx, point in enumerate(memory_points):
+        if not predicate(point):
+            continue
+        weight = point.get("weight", math.inf)
+        if weight < lowest_weight:
+            lowest_weight = weight
+            lowest_idx = idx
+    if lowest_idx is None:
+        return None
+    return memory_points.pop(lowest_idx)
 
 
 def infer_memory_category(memory_content: str) -> str:
@@ -113,36 +251,39 @@ def is_person_known(person_id: str = None, user_id: str = None, platform: str = 
         return False
 
 
-def get_category_from_memory(memory_point: str) -> Optional[str]:
+def get_category_from_memory(memory_point: Union[str, MemoryPointDict, None]) -> Optional[str]:
     """从记忆点中获取分类"""
-    # 按照最左边的:符号进行分割，返回分割后的第一个部分作为分类
-    if not isinstance(memory_point, str):
-        return None
-    parts = memory_point.split(":", 1)
-    return parts[0].strip() if len(parts) > 1 else None
+    if isinstance(memory_point, dict):
+        return memory_point.get("category") or DEFAULT_MEMORY_CATEGORY
+    if isinstance(memory_point, str):
+        parts = memory_point.split(":", 1)
+        return parts[0].strip() if len(parts) > 1 else None
+    return None
 
 
-def get_weight_from_memory(memory_point: str) -> float:
+def get_weight_from_memory(memory_point: Union[str, MemoryPointDict, None]) -> float:
     """从记忆点中获取权重"""
-    # 按照最右边的:符号进行分割，返回分割后的最后一个部分作为权重
-    if not isinstance(memory_point, str):
-        return -math.inf
-    parts = memory_point.rsplit(":", 1)
-    if len(parts) <= 1:
-        return -math.inf
-    try:
-        return float(parts[-1].strip())
-    except Exception:
-        return -math.inf
+    if isinstance(memory_point, dict):
+        return float(memory_point.get("weight", 0.0))
+    if isinstance(memory_point, str):
+        parts = memory_point.rsplit(":", 1)
+        if len(parts) <= 1:
+            return -math.inf
+        try:
+            return float(parts[-1].strip())
+        except Exception:
+            return -math.inf
+    return -math.inf
 
 
-def get_memory_content_from_memory(memory_point: str) -> str:
+def get_memory_content_from_memory(memory_point: Union[str, MemoryPointDict, None]) -> str:
     """从记忆点中获取记忆内容"""
-    # 按:进行分割，去掉第一段和最后一段，返回中间部分作为记忆内容
-    if not isinstance(memory_point, str):
-        return ""
-    parts = memory_point.split(":")
-    return ":".join(parts[1:-1]).strip() if len(parts) > 2 else ""
+    if isinstance(memory_point, dict):
+        return (memory_point.get("content") or "").strip()
+    if isinstance(memory_point, str):
+        parts = memory_point.split(":")
+        return ":".join(parts[1:-1]).strip() if len(parts) > 2 else ""
+    return ""
 
 
 def extract_categories_from_response(response: str) -> list[str]:
@@ -293,10 +434,10 @@ class Person:
         self.know_times = 0
         self.know_since: Optional[float] = None
         self.last_know: Optional[float] = None
-        self.memory_points: List[str] = []
+        self.memory_points: List[MemoryPointDict] = []
         self.group_nick_name: List[dict[str, str]] = []
         self.is_known = False
-        self._group_memory_cache: dict[str, List[str]] = {}
+        self._group_memory_cache: dict[str, List[MemoryPointDict]] = {}
 
         if platform == global_config.bot.platform and user_id == global_config.bot.qq_account:
             self.is_known = True
@@ -351,35 +492,24 @@ class Person:
             return 0
 
         deleted_count = 0
-        memory_points_to_keep = []
+        memory_points_to_keep: List[MemoryPointDict] = []
 
         for memory_point in self.memory_points:
-            # 跳过None值
-            if memory_point is None:
+            if not memory_point:
                 continue
-            # 解析记忆点
-            parts = memory_point.split(":", 2)  # 最多分割2次，保留记忆内容中的冒号
-            if len(parts) < 3:
-                # 格式不正确，保留原样
-                memory_points_to_keep.append(memory_point)
-                continue
+            memory_category = memory_point.get("category")
+            memory_text = memory_point.get("content") or ""
 
-            memory_category = parts[0].strip()
-            memory_text = parts[1].strip()
-            _memory_weight = parts[2].strip()
-
-            # 检查分类是否匹配
             if memory_category != category:
                 memory_points_to_keep.append(memory_point)
                 continue
 
-            # 计算记忆内容的相似度
             similarity = calculate_string_similarity(memory_content, memory_text)
-
-            # 如果相似度达到阈值，则删除（不添加到保留列表）
             if similarity >= similarity_threshold:
                 deleted_count += 1
-                logger.debug(f"删除记忆点: {memory_point} (相似度: {similarity:.4f})")
+                logger.debug(
+                    f"删除记忆点: {_memory_to_log_string(memory_point)} (相似度: {similarity:.4f})"
+                )
             else:
                 memory_points_to_keep.append(memory_point)
 
@@ -396,32 +526,28 @@ class Person:
     def _ensure_memory_points_initialized(self):
         if not isinstance(self.memory_points, list):
             self.memory_points = []
+        else:
+            sanitized = _sanitize_memory_points(self.memory_points)
+            if sanitized != self.memory_points:
+                self.memory_points = sanitized
 
     def _compact_memory_points(self):
         self._ensure_memory_points_initialized()
-        valid_points = [point for point in self.memory_points if isinstance(point, str) and point.strip()]
-        if len(valid_points) != len(self.memory_points):
-            self.memory_points = valid_points
 
     def _remove_lowest_weight_point(self, *, predicate: Optional[Callable[[str], bool]] = None):
         if not self.memory_points:
             return
 
-        predicate = predicate or (lambda _p: True)
-        lowest_idx = None
-        lowest_weight = math.inf
+        predicate_dict: Optional[Callable[[MemoryPointDict], bool]] = None
+        if predicate:
+            predicate_dict = lambda point: predicate(_memory_to_log_string(point))  # type: ignore[arg-type]
 
-        for idx, point in enumerate(self.memory_points):
-            if not isinstance(point, str) or not predicate(point):
-                continue
-            weight = get_weight_from_memory(point)
-            if weight < lowest_weight:
-                lowest_weight = weight
-                lowest_idx = idx
-
-        if lowest_idx is not None:
-            removed_point = self.memory_points.pop(lowest_idx)
-            logger.debug(f"移除记忆点以腾出空间: {removed_point}")
+        removed_point = _remove_lowest_weight_entry(
+            self.memory_points,
+            predicate=predicate_dict,
+        )
+        if removed_point:
+            logger.debug(f"移除记忆点以腾出空间: {_memory_to_log_string(removed_point)}")
 
     def _ensure_memory_capacity(self, category: str):
         self._compact_memory_points()
@@ -440,6 +566,8 @@ class Person:
         category: Optional[str] = None,
         weight: float = 1.0,
         similarity_fn: Optional[Callable[[str, str], float]] = None,
+        source: Optional[str] = None,
+        context: Optional[str] = None,
     ) -> bool:
         if not self.is_known:
             logger.debug(f"用户 {self.person_id} 尚未被标记为已认识，无法添加记忆")
@@ -455,40 +583,55 @@ class Person:
 
         self._compact_memory_points()
 
-        duplicate_idx = None
-        for idx, point in enumerate(self.memory_points):
-            if not isinstance(point, str):
-                continue
-            point_category = get_category_from_memory(point)
-            if point_category != category:
+        now = _current_timestamp()
+        duplicate_point: Optional[MemoryPointDict] = None
+        for point in self.memory_points:
+            if get_category_from_memory(point) != category:
                 continue
             existing_content = get_memory_content_from_memory(point)
             similarity = similarity_fn(existing_content, memory_content)
             if similarity >= MEMORY_SIMILARITY_THRESHOLD:
-                duplicate_idx = idx
+                duplicate_point = point
                 break
 
-        if duplicate_idx is not None:
-            existing_point = self.memory_points[duplicate_idx]
-            merged_weight = _normalize_weight(
-                (get_weight_from_memory(existing_point) + weight_value) / 2 + 0.05
-            )
-            updated_point = f"{category}:{memory_content}:{merged_weight}"
-            self.memory_points[duplicate_idx] = updated_point
-            logger.debug(f"更新已存在的记忆点: {updated_point}")
+        if duplicate_point is not None:
+            old_weight = duplicate_point.get("weight", 1.0)
+            merged_weight = _normalize_weight(old_weight * 0.7 + weight_value * 0.3 + 0.2)
+            duplicate_point["weight"] = merged_weight
+            duplicate_point["content"] = memory_content
+            duplicate_point["updated_at"] = now
+            duplicate_point["last_used_at"] = now
+            duplicate_point["hits"] = int(duplicate_point.get("hits", 0)) + 1
+            if source:
+                duplicate_point["source"] = source
+            if context:
+                duplicate_point["context"] = context
+            logger.debug(f"更新已存在的记忆点: {_memory_to_log_string(duplicate_point)}")
         else:
             self._ensure_memory_capacity(category)
-            new_point = f"{category}:{memory_content}:{weight_value}"
+            new_point: MemoryPointDict = {
+                "category": category,
+                "content": memory_content,
+                "weight": weight_value,
+                "created_at": now,
+                "updated_at": now,
+                "last_used_at": now,
+                "hits": 1,
+            }
+            if source:
+                new_point["source"] = source
+            if context:
+                new_point["context"] = context
             self.memory_points.append(new_point)
-            logger.debug(f"新增记忆点: {new_point}")
+            logger.debug(f"新增记忆点: {_memory_to_log_string(new_point)}")
 
         self.sync_to_database()
         return True
 
     def get_all_category(self):
-        category_list = []
+        category_list: List[str] = []
         for memory in self.memory_points:
-            if memory is None:
+            if not memory:
                 continue
             category = get_category_from_memory(memory)
             if category and category not in category_list:
@@ -496,9 +639,9 @@ class Person:
         return category_list
 
     def get_memory_list_by_category(self, category: str):
-        memory_list = []
+        memory_list: List[MemoryPointDict] = []
         for memory in self.memory_points:
-            if memory is None:
+            if not memory:
                 continue
             if get_category_from_memory(memory) == category:
                 memory_list.append(memory)
@@ -506,7 +649,7 @@ class Person:
 
     def get_random_memory_by_category(self, category: str, num: int = 1):
         memory_list = self.get_memory_list_by_category(category)
-        if len(memory_list) < num:
+        if len(memory_list) <= num:
             return memory_list
         return random.sample(memory_list, num)
 
@@ -538,9 +681,14 @@ class Person:
             return self.get_random_memory_by_category(category, num)
 
         scored_memories = []
+        now = _current_timestamp()
         for memory in memory_list:
             content = get_memory_content_from_memory(memory)
-            score = self._calculate_relevance(content, chat_content)
+            relevance = self._calculate_relevance(content, chat_content)
+            weight_bonus = get_weight_from_memory(memory) / MEMORY_MAX_WEIGHT
+            last_used = memory.get("last_used_at") or memory.get("updated_at") or memory.get("created_at") or now
+            recency = max(0.0, 1.0 - (now - last_used) / MEMORY_RECENCY_TIMESPAN)
+            score = relevance * 0.6 + weight_bonus * 0.25 + recency * 0.15
             scored_memories.append((score, memory))
 
         # 按分数降序排序
@@ -554,7 +702,7 @@ class Person:
 
         return [m[1] for m in scored_memories[:num]]
 
-    def get_group_memory_points(self, group_id: str) -> List[str]:
+    def get_group_memory_points(self, group_id: str) -> List[MemoryPointDict]:
         group_id = (group_id or "").strip()
         if not group_id:
             return []
@@ -567,7 +715,7 @@ class Person:
         if group_id in cache:
             return cache[group_id]
 
-        memory_points: List[str] = []
+        memory_points: List[MemoryPointDict] = []
         try:
             record = PersonGroupMemory.get_or_none(
                 (PersonGroupMemory.person_id == self.person_id) & (PersonGroupMemory.group_id == group_id)
@@ -575,7 +723,7 @@ class Person:
             if record and record.memory_points:
                 loaded_points = json.loads(record.memory_points)
                 if isinstance(loaded_points, list):
-                    memory_points = [p for p in loaded_points if isinstance(p, str) and p.strip()]
+                    memory_points = _sanitize_memory_points(loaded_points)
         except Exception as e:
             logger.warning(f"解析用户 {self.person_id} 在群 {group_id} 的记忆失败: {e}")
 
@@ -609,61 +757,51 @@ class Person:
 
         memory_points = self.get_group_memory_points(group_id)
 
-        duplicate_idx = None
-        for idx, point in enumerate(memory_points):
-            if not isinstance(point, str):
-                continue
-            point_category = get_category_from_memory(point)
-            if point_category != category:
+        duplicate_point: Optional[MemoryPointDict] = None
+        now = _current_timestamp()
+        for point in memory_points:
+            if get_category_from_memory(point) != category:
                 continue
             existing_content = get_memory_content_from_memory(point)
             similarity = similarity_fn(existing_content, memory_content)
             if similarity >= MEMORY_SIMILARITY_THRESHOLD:
-                duplicate_idx = idx
+                duplicate_point = point
                 break
 
-        if duplicate_idx is not None:
-            existing_point = memory_points[duplicate_idx]
-            merged_weight = _normalize_weight(
-                (get_weight_from_memory(existing_point) + weight_value) / 2 + 0.05
-            )
-            updated_point = f"{category}:{memory_content}:{merged_weight}"
-            memory_points[duplicate_idx] = updated_point
-            logger.debug(f"更新已存在的群记忆点: {updated_point}")
+        if duplicate_point is not None:
+            old_weight = duplicate_point.get("weight", 1.0)
+            merged_weight = _normalize_weight(old_weight * 0.7 + weight_value * 0.3 + 0.2)
+            duplicate_point["weight"] = merged_weight
+            duplicate_point["content"] = memory_content
+            duplicate_point["updated_at"] = now
+            duplicate_point["last_used_at"] = now
+            duplicate_point["hits"] = int(duplicate_point.get("hits", 0)) + 1
+            logger.debug(f"更新已存在的群记忆点: {_memory_to_log_string(duplicate_point)}")
         else:
-            # 按分类和总量控制群记忆容量
             category_points = [p for p in memory_points if get_category_from_memory(p) == category]
             if len(category_points) >= MAX_MEMORY_POINTS_PER_CATEGORY:
-                lowest_idx = None
-                lowest_weight = math.inf
-                for idx, point in enumerate(memory_points):
-                    if get_category_from_memory(point) != category:
-                        continue
-                    weight_value_existing = get_weight_from_memory(point)
-                    if weight_value_existing < lowest_weight:
-                        lowest_weight = weight_value_existing
-                        lowest_idx = idx
-                if lowest_idx is not None:
-                    removed_point = memory_points.pop(lowest_idx)
-                    logger.debug(f"移除群记忆点以腾出空间: {removed_point}")
+                removed_point = _remove_lowest_weight_entry(
+                    memory_points, predicate=lambda p: get_category_from_memory(p) == category
+                )
+                if removed_point:
+                    logger.debug(f"移除群记忆点以腾出空间: {_memory_to_log_string(removed_point)}")
 
             if len(memory_points) >= MAX_MEMORY_POINTS:
-                lowest_idx = None
-                lowest_weight = math.inf
-                for idx, point in enumerate(memory_points):
-                    if not isinstance(point, str):
-                        continue
-                    weight_value_existing = get_weight_from_memory(point)
-                    if weight_value_existing < lowest_weight:
-                        lowest_weight = weight_value_existing
-                        lowest_idx = idx
-                if lowest_idx is not None:
-                    removed_point = memory_points.pop(lowest_idx)
-                    logger.debug(f"移除群记忆点以腾出空间: {removed_point}")
+                removed_point = _remove_lowest_weight_entry(memory_points)
+                if removed_point:
+                    logger.debug(f"移除群记忆点以腾出空间: {_memory_to_log_string(removed_point)}")
 
-            new_point = f"{category}:{memory_content}:{weight_value}"
+            new_point: MemoryPointDict = {
+                "category": category,
+                "content": memory_content,
+                "weight": weight_value,
+                "created_at": now,
+                "updated_at": now,
+                "last_used_at": now,
+                "hits": 1,
+            }
             memory_points.append(new_point)
-            logger.debug(f"新增群记忆点: {new_point}")
+            logger.debug(f"新增群记忆点: {_memory_to_log_string(new_point)}")
 
         try:
             record, created = PersonGroupMemory.get_or_create(
@@ -723,16 +861,15 @@ class Person:
                 if record.memory_points:
                     try:
                         loaded_points = json.loads(record.memory_points)
-                        # 过滤掉None值，确保数据质量
                         if isinstance(loaded_points, list):
-                            self.memory_points = [point for point in loaded_points if point is not None]
+                            self.memory_points = _sanitize_memory_points(loaded_points)
                         else:
                             self.memory_points = []
                     except (json.JSONDecodeError, TypeError):
                         logger.warning(f"解析用户 {self.person_id} 的points字段失败，使用默认值")
                         self.memory_points = []
                 else:
-                    self.memory_points = []
+                    self.memory_points = [{"category": "default", "content": "", "weight": 1.0, "created_at": _current_timestamp(), "updated_at": _current_timestamp(), "last_used_at": _current_timestamp(), "hits": 0}]
 
                 # 处理group_nick_name字段（JSON格式的列表）
                 if record.group_nick_name:
@@ -775,9 +912,7 @@ class Person:
                 "know_times": self.know_times,
                 "know_since": self.know_since,
                 "last_know": self.last_know,
-                "memory_points": json.dumps(
-                    [point for point in self.memory_points if point is not None], ensure_ascii=False
-                )
+                "memory_points": json.dumps(self.memory_points, ensure_ascii=False)
                 if self.memory_points
                 else json.dumps([], ensure_ascii=False),
                 "group_nick_name": json.dumps(self.group_nick_name, ensure_ascii=False)
