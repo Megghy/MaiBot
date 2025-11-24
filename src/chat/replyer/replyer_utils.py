@@ -6,6 +6,7 @@ from src.person_info.person_info import (
     Person,
     get_category_from_memory,
     get_memory_content_from_memory,
+    get_weight_from_memory,
 )
 
 
