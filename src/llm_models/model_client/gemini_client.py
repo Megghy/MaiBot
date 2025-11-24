@@ -605,7 +605,7 @@ class GeminiClient(BaseClient):
             "safety_settings": gemini_safe_settings,  # 防止空回复问题
         }
         if tools:
-            generation_config_dict["tools"] = Tool(function_declarations=tools)
+            generation_config_dict["tools"] = [Tool(function_declarations=tools)]
         if messages[1]:
             # 如果有system消息，则将其添加到配置中
             generation_config_dict["system_instructions"] = messages[1]
