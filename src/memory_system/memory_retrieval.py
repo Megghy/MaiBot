@@ -165,6 +165,8 @@ MAX_COLLECTED_INFO_LENGTH = 2000  # ReAct上下文最大长度
 COLLECTED_INFO_TRUNCATE_NOTICE = "…（已截断，仅保留最近信息）\n"
 MIN_QA_ANALYSIS_CONFIDENCE = 0.75  # 低于该置信度的结果将被丢弃
 
+MAX_QUESTIONS_PER_TURN = 2
+
 # 定义特殊工具用于提交答案
 SPECIAL_TOOL_DEFINITIONS = [
     {
@@ -262,6 +264,24 @@ def _format_agent_summary(thinking_steps: List[Dict[str, Any]], max_steps: int =
         summary_lines.append("……")
 
     return "\n".join(summary_lines)
+
+
+def _has_successful_observation(thinking_steps: List[Dict[str, Any]]) -> bool:
+    for step in thinking_steps or []:
+        observations = step.get("observations") or []
+        for observation in observations:
+            text = _safe_str(observation)
+            if not text:
+                continue
+            parts = text.split("：", 1)
+            payload = parts[1].strip() if len(parts) == 2 else text
+            try:
+                data = json.loads(payload)
+            except Exception:
+                continue
+            if isinstance(data, dict) and data.get("success") is True:
+                return True
+    return False
 
 
 def _extract_answer_source(thinking_steps: List[Dict[str, Any]]) -> str:
@@ -390,9 +410,9 @@ def _calculate_iteration_budget(question: str, initial_info: str) -> int:
         complexity_score -= 1
 
     if complexity_score <= -1:
-        return 2
+        return 1
     if complexity_score == 0:
-        return max(2, base - 1)
+        return min(base, 2)
     return base
 
 
@@ -456,7 +476,8 @@ def init_memory_retrieval_prompt():
 编写问题时请注意:
 - 聊天里若出现 "上次", "那个ta", "之前说" 等模糊指代, 需要展开成可检索的问题.
 - 如果 recent_query_history 已有部分答案, 但你还需更多细节, 可以在问题里说明想补充的方向.
-- 先确保真的无法用现有信息回复, 再提出检索; 没有疑问词、上下文足够时, 不要生成检索问题。
+- 先确保真的无法用现有信息回复, 再提出检索; 没有疑问词、上下文足够时, 不要生成检索问题.
+- 如果多个疑问都围绕同一对人物或同一件事的不同细节, 请尽量合并为 1~2 个综合问题, 避免拆分过细.
 
 输出 JSON, 且只输出 JSON:
 {{
@@ -497,9 +518,9 @@ def init_memory_retrieval_prompt():
 - 如果需要更多信息，决定调用检索类工具（如 `search_chat_history` 等）。
 
 **第二步: 行动(Action)**
-- 如果涉及过往事件, 可以使用聊天记录查询工具查询过往事件
+- 如果涉及过往事件、态度、冲突或关系变化, 优先使用聊天记录查询工具查询相关片段或事件
 - 如果涉及概念, 可以用 jargon 查询, 或根据关键词检索聊天记录
-- 如果涉及人物, 可以使用人物信息查询工具查询人物信息
+- 如果涉及人物的静态档案信息(如昵称、平台、用户ID、人格标签等), 可以使用人物信息查询工具查询人物信息; 不要依赖人物信息工具推断具体事件经过
 {lpmm_hint}
 - 如果信息不足且需要继续查询, 说明最需要查询什么, 并输出为纯文本说明, 然后调用相应工具查询(可并行调用多个工具)
 
@@ -539,6 +560,7 @@ Action: 调用 `found_answer(answer="昨天张三提到了GitHub", source="memor
 
 **重要规则:**
 - 你已经经过几轮查询, 尝试了信息搜集, 现在你需要总结信息, 选择回答问题或判断问题无法回答
+- 本轮中不应再调用任何查询类工具, 只能在 `found_answer` 和 `not_enough_info` 之间做出选择
 - 优先使用检索到的信息回答问题; 在检索完全失败的情况下, 可以在明确标注 source="model" 的前提下, 使用你的常识/通用知识给出答案
 - 不允许为了逃避 not_enough_info 而胡乱编造明显错误的信息
 - 答案必须精简, 不要过多解释
@@ -865,6 +887,15 @@ async def _react_agent_solve_question(
                 f"ReAct Agent 第 {iteration + 1} 次迭代 工具调用 {i + 1}/{len(tool_calls)}: {tool_name}({tool_args})"
             )
 
+            # 最后一轮不应再执行检索类工具，防止继续耗时查询
+            if is_final_iteration and tool_name not in {"found_answer", "not_enough_info"}:
+                logger.warning(
+                    f"ReAct Agent 第 {iteration + 1} 次迭代 仍尝试调用检索工具 {tool_name}，按规则已忽略"
+                )
+                step["actions"].append({"action_type": tool_name, "action_params": tool_args})
+                step["observations"].append(f"最终迭代忽略检索工具调用: {tool_name}")
+                continue
+
             tool = tool_registry.get_tool(tool_name)
             if tool:
                 # 准备工具参数
@@ -926,11 +957,20 @@ async def _react_agent_solve_question(
         logger.warning(
             f"ReAct Agent达到最大迭代次数或超时，但未明确返回found_answer。已收集信息: {collected_info[:100]}..."
         )
+
+    has_success = _has_successful_observation(thinking_steps)
+
     if is_timeout:
         logger.warning("ReAct Agent超时，直接视为not_enough_info")
+        fallback_answer = "查询超时，未能在限制时间内完成信息整理"
     else:
         logger.warning("ReAct Agent达到最大迭代次数，直接视为not_enough_info")
-    return False, "未找到相关信息", thinking_steps, is_timeout
+        if has_success:
+            fallback_answer = "已检索到相关记录，但Agent未能在限定轮次内整理出明确答案"
+        else:
+            fallback_answer = "未找到相关信息"
+
+    return False, fallback_answer, thinking_steps, is_timeout
 
 
 def _get_recent_query_history(chat_id: str, time_window_seconds: float = 300.0) -> str:
@@ -1411,15 +1451,17 @@ async def build_memory_retrieval_prompt(
         # 解析概念列表和问题列表
         concepts, questions = _parse_questions_json(response)
         logger.info(f"解析到 {len(concepts)} 个概念: {concepts}")
-        logger.info(f"解析到 {len(questions)} 个问题: {questions}")
+        logger.info(f"解析到 {len(questions)} 个问题(原始): {questions}")
 
         # 对概念进行jargon检索，作为初始信息
         initial_info = ""
+        concept_info_found = False
         if concepts:
             logger.info(f"开始对 {len(concepts)} 个概念进行jargon检索")
             concept_info = await _retrieve_concepts_with_jargon(concepts, chat_id)
             if concept_info:
                 initial_info += concept_info
+                concept_info_found = True
                 logger.info(f"概念检索完成，结果: {concept_info[:200]}...")
             else:
                 logger.info("概念检索未找到任何结果")
@@ -1428,13 +1470,31 @@ async def build_memory_retrieval_prompt(
         cached_memories = await asyncio.to_thread(_get_cached_memories, chat_id, time_window_seconds=300.0)
 
         if not questions:
+            fallback_reason = None
             if _should_use_fallback_question(target, has_recent_query_history=has_recent_query_history):
+                fallback_reason = "heuristic"
+            elif not concepts:
+                fallback_reason = "no_concepts"
+            elif concepts and not concept_info_found:
+                fallback_reason = "concepts_without_results"
+
+            if fallback_reason:
                 fallback = _build_fallback_question(sender, target)
                 if fallback:
-                    logger.info(f"问题列表为空，使用自动回退问题: {fallback}")
+                    logger.info(
+                        f"问题列表为空，因 {fallback_reason} 触发自动回退问题: {fallback}"
+                    )
                     questions = [fallback]
-            else:
+            if not questions:
                 logger.info("问题列表为空，且启发式判断无需触发回退问题")
+
+        # 控制单轮问题数量上限，避免问题拆分过多
+        if questions and len(questions) > MAX_QUESTIONS_PER_TURN:
+            logger.info(
+                f"问题数量 {len(questions)} 超过上限 {MAX_QUESTIONS_PER_TURN}，仅保留前 {MAX_QUESTIONS_PER_TURN} 个问题"
+            )
+            questions = questions[:MAX_QUESTIONS_PER_TURN]
+            logger.info(f"截断后的问题列表: {questions}")
 
         await _record_question_generation_trace(
             chat_stream,
