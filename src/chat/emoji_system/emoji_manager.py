@@ -936,18 +936,33 @@ class EmojiManager:
                 logger.info("[优化] 复用已有的详细描述，跳过VLM调用")
             else:
                 logger.info("[VLM分析] 生成新的详细描述")
+                # 根据 VLM 是否为 Gemini-only 决定 GIF 的处理方式
+                img_manager = get_image_manager()
+                vlm_is_gemini_only = getattr(img_manager, "vlm_is_gemini_only", False)
+
                 if image_format in ["gif", "GIF"]:
-                    image_base64 = get_image_manager().transform_gif(image_base64)  # type: ignore
-                    if not image_base64:
-                        raise RuntimeError("GIF表情包转换失败")
-                    prompt = (
-                        "这是一个动态图表情包。请直接用一句话概括它的情绪和梗点，"
-                        "限制在100字以内，侧重表达含义和使用场景，不要写格式或画面细节，"
-                        "也不要出现诸如‘好的，我们来’之类的开场。"
-                    )
-                    description, _ = await self.vlm.generate_response_for_image(
-                        prompt, image_base64, "jpg", temperature=0.5
-                    )
+                    if vlm_is_gemini_only:
+                        # Gemini 支持直接处理 GIF，不再转成 JPG
+                        prompt = (
+                            "这是一个动态图表情包。请直接用一句话概括它的情绪和梗点，"
+                            "限制在100字以内，侧重表达含义和使用场景，不要写格式或画面细节，"
+                            "也不要出现诸如‘好的，我们来’之类的开场。"
+                        )
+                        description, _ = await self.vlm.generate_response_for_image(
+                            prompt, image_base64, image_format, temperature=0.5
+                        )
+                    else:
+                        image_base64 = img_manager.transform_gif(image_base64)  # type: ignore
+                        if not image_base64:
+                            raise RuntimeError("GIF表情包转换失败")
+                        prompt = (
+                            "这是一个动态图表情包。请直接用一句话概括它的情绪和梗点，"
+                            "限制在100字以内，侧重表达含义和使用场景，不要写格式或画面细节，"
+                            "也不要出现诸如‘好的，我们来’之类的开场。"
+                        )
+                        description, _ = await self.vlm.generate_response_for_image(
+                            prompt, image_base64, "jpg", temperature=0.5
+                        )
                 else:
                     prompt = (
                         "这是一个表情包。请用一句紧凑的话概括它表达的情绪、梗点或使用场景，"

@@ -799,4 +799,4 @@ class GeminiClient(BaseClient):
         获取支持的图片格式
         :return: 支持的图片格式列表
         """
-        return ["png", "jpg", "jpeg", "webp", "heic", "heif"]
+        return ["png", "jpg", "jpeg", "webp", "gif", "heic", "heif"]

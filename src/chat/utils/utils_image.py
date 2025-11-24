@@ -38,6 +38,19 @@ class ImageManager:
             self._initialized = True
             self.vlm = LLMRequest(model_set=model_config.model_task_config.vlm, request_type="image")
 
+            # 检测当前 VLM 任务是否只使用 Gemini 客户端（用于决定 GIF 是否直接传给模型）
+            self.vlm_is_gemini_only = False
+            try:
+                vlm_task = model_config.model_task_config.vlm
+                if vlm_task.model_list:
+                    self.vlm_is_gemini_only = all(
+                        model_config.get_provider(model_config.get_model_info(model_name).api_provider).client_type
+                        == "gemini"
+                        for model_name in vlm_task.model_list
+                    )
+            except Exception as e:
+                logger.warning(f"检测 VLM 模型类型失败: {e}")
+
             try:
                 db.connect(reuse_if_open=True)
                 db.create_tables([Images, ImageDescriptions], safe=True)
@@ -167,17 +180,33 @@ class ImageManager:
 
             # 第一步：VLM视觉分析 - 生成详细描述
             if image_format in ["gif", "GIF"]:
-                image_base64_processed = self.transform_gif(image_base64)
-                if image_base64_processed is None:
-                    logger.warning("GIF转换失败，无法获取描述")
-                    return "[表情包(GIF处理失败)]"
-                vlm_prompt = "这是一个动态图表情包，每一张图代表了动态图的某一帧，黑色背景代表透明，描述一下表情包表达的情感和内容，描述细节，从互联网梗,meme的角度去分析"
-                detailed_description, _ = await self.vlm.generate_response_for_image(
-                    vlm_prompt, image_base64_processed, "jpg", temperature=0.4
-                )
+                # 如果 VLM 只使用 Gemini，则直接上传 GIF
+                if getattr(self, "vlm_is_gemini_only", False):
+                    vlm_prompt = (
+                        "这是一个在聊天中使用的动态图表情包，每一张图代表了动态图的某一帧，黑色背景代表透明。"
+                        "请详细描述它表达的情绪和内容，可以顺便说明大概在玩什么梗或笑点、一般在什么场景下使用，"
+                        "从互联网梗、meme 的角度去分析。"
+                    )
+                    detailed_description, _ = await self.vlm.generate_response_for_image(
+                        vlm_prompt, image_base64, image_format, temperature=0.4
+                    )
+                else:
+                    image_base64_processed = self.transform_gif(image_base64)
+                    if image_base64_processed is None:
+                        logger.warning("GIF转换失败，无法获取描述")
+                        return "[表情包(GIF处理失败)]"
+                    vlm_prompt = (
+                        "这是一个在聊天中使用的动态图表情包，每一张图代表了动态图的某一帧，黑色背景代表透明。"
+                        "请详细描述它表达的情绪和内容，可以顺便说明大概在玩什么梗或笑点、一般在什么场景下使用，"
+                        "从互联网梗、meme 的角度去分析。"
+                    )
+                    detailed_description, _ = await self.vlm.generate_response_for_image(
+                        vlm_prompt, image_base64_processed, "jpg", temperature=0.4
+                    )
             else:
                 vlm_prompt = (
-                    "这是一个表情包，请详细描述一下表情包所表达的情感和内容，描述细节，从互联网梗,meme的角度去分析"
+                    "这是一个在聊天中使用的表情包，请详细描述它所表达的情感和内容，可以顺便说明大概在玩什么梗或笑点、"
+                    "一般在什么场景下使用，从互联网梗,meme的角度去分析。"
                 )
                 detailed_description, _ = await self.vlm.generate_response_for_image(
                     vlm_prompt, image_base64, image_format, temperature=0.4
@@ -297,7 +326,14 @@ class ImageManager:
 
             # 调用AI获取描述
             image_format = Image.open(io.BytesIO(image_bytes)).format.lower()  # type: ignore
-            prompt = global_config.personality.visual_style
+            prompt = (
+                "你正在帮忙理解一张在聊天中分享的图片，这张图片可能是表情包/meme、搞笑图片、截图，"
+                "也可能是普通的生活照片或风景自拍。请先大致判断它属于哪一类（例如：聊天梗图、搞笑表情、日常生活照、风景照、记录截图等），"
+                "如果是梗图、meme 或搞笑图片，请顺带用自然中文简单说明大概在玩什么梗/什么笑点，以及大致的使用场景；"
+                "如果是聊天截图或系统界面截图，请做内容摘要，概括关键信息和对话/操作的大意，而不是描绘界面元素本身；"
+                "在此基础上，再用简洁的中文描述出对聊天最有用的关键信息和整体情绪氛围，语气自然口语化，控制在几句话以内，不要逐像素罗列细节。"
+            )
+            prompt = f"{prompt}\n\n{global_config.personality.visual_style}"
             logger.info(f"[VLM调用] 为图片生成新描述 (Hash: {image_hash[:8]}...)")
             description, _ = await self.vlm.generate_response_for_image(
                 prompt, image_base64, image_format, temperature=0.4
@@ -593,7 +629,14 @@ class ImageManager:
             image_format = Image.open(io.BytesIO(image_bytes)).format.lower()  # type: ignore
 
             # 构建prompt
-            prompt = global_config.personality.visual_style
+            prompt = (
+                "你正在帮忙理解一张在聊天中分享的图片，这张图片可能是表情包/meme、搞笑图片、截图，"
+                "也可能是普通的生活照片或风景自拍。请先大致判断它属于哪一类（例如：聊天梗图、搞笑表情、日常生活照、风景照、记录截图等），"
+                "如果是梗图、meme 或搞笑图片，请顺带用自然中文简单说明大概在玩什么梗/什么笑点，以及大致的使用场景；"
+                "如果是聊天截图或系统界面截图，请做内容摘要，概括关键信息和对话/操作的大意，而不是描绘界面元素本身；"
+                "在此基础上，再用简洁的中文描述出对聊天最有用的关键信息和整体情绪氛围，语气自然口语化，控制在几句话以内，不要逐像素罗列细节。"
+            )
+            prompt = f"{prompt}\n\n{global_config.personality.visual_style}"
 
             # 获取VLM描述
             description, _ = await self.vlm.generate_response_for_image(
