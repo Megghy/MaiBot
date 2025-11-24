@@ -9,13 +9,24 @@ from src.person_info.person_info import (
 )
 
 
-def build_person_memory_block(person: Optional[Person], max_points: int = 4) -> str:
+def build_person_memory_block(person: Optional[Person], group_id: Optional[str] = None, max_points: int = 4) -> str:
     """为当前回复目标生成记忆点提示"""
 
     if not person or not person.is_known:
         return ""
 
-    memory_points = getattr(person, "memory_points", None)
+    # 群聊优先使用该群的群级记忆；如果该群没有群级记忆，则回退到全局记忆
+    memory_points = None
+    group_id_normalized = (group_id or "").strip()
+    if group_id_normalized:
+        try:
+            group_points = person.get_group_memory_points(group_id_normalized)
+            if group_points:
+                memory_points = group_points
+        except Exception:
+            memory_points = None
+    if not memory_points:
+        memory_points = getattr(person, "memory_points", None)
     if not memory_points:
         return ""
 

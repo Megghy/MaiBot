@@ -10,7 +10,7 @@ import traceback
 from src.common.logger import get_logger
 from src.config.config import model_config
 from src.config.api_ada_configs import APIProvider, ModelInfo, TaskConfig
-from .payload_content.message import MessageBuilder, Message
+from .payload_content.message import MessageBuilder, Message, RoleType
 from .payload_content.resp_format import RespFormat
 from .payload_content.tool_option import ToolOption, ToolCall, ToolOptionBuilder, ToolParamType
 from .model_client.base_client import BaseClient, APIResponse, client_registry
@@ -136,6 +136,71 @@ class LLMRequest:
             message_builder = MessageBuilder()
             message_builder.add_text_content(prompt)
             return [message_builder.build()]
+
+        tool_built = self._build_tool_options(tools)
+
+        response, model_info = await self._execute_request(
+            request_type=RequestType.RESPONSE,
+            message_factory=message_factory,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tool_options=tool_built,
+        )
+
+        logger.debug(f"LLM请求总耗时: {time.time() - start_time}")
+        logger.debug(f"LLM生成内容: {response}")
+
+        content = response.content
+        reasoning_content = response.reasoning_content or ""
+        tool_calls = response.tool_calls
+        if not reasoning_content and content:
+            content, extracted_reasoning = self._extract_reasoning(content)
+            reasoning_content = extracted_reasoning
+        if usage := response.usage:
+            llm_usage_recorder.record_usage_to_database(
+                model_info=model_info,
+                model_usage=usage,
+                user_id="system",
+                request_type=self.request_type,
+                endpoint="/chat/completions",
+                time_cost=time.time() - start_time,
+            )
+        return content or "", (reasoning_content, model_info.name, tool_calls)
+
+    async def generate_response_with_system_user_async(
+        self,
+        system_prompt: Optional[str],
+        user_prompt: str,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        raise_when_empty: bool = True,
+    ) -> Tuple[str, Tuple[str, str, Optional[List[ToolCall]]]]:
+        """使用 system + user 两段提示词生成响应。
+
+        这是在现有 generate_response_async 之上的一个轻量封装，
+        方便上层调用时将稳定的系统规则与动态用户上下文分离。
+        """
+
+        start_time = time.time()
+
+        def message_factory(client: BaseClient) -> List[Message]:
+            messages: List[Message] = []
+
+            # 可选的 system message
+            if system_prompt:
+                sys_builder = MessageBuilder()
+                sys_builder.set_role(RoleType.System)
+                sys_builder.add_text_content(system_prompt)
+                messages.append(sys_builder.build())
+
+            # 必选的 user message
+            user_builder = MessageBuilder()
+            user_builder.set_role(RoleType.User)
+            user_builder.add_text_content(user_prompt)
+            messages.append(user_builder.build())
+
+            return messages
 
         tool_built = self._build_tool_options(tools)
 

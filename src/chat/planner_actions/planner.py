@@ -35,8 +35,6 @@ def init_prompt():
     Prompt(
         """
 {time_block}
-{name_block}
-你的兴趣是: {interest}
 {chat_context_description}, 以下是具体的聊天内容
 **Chat Content**
 {chat_content_block}
@@ -45,22 +43,12 @@ def init_prompt():
 {actions_before_now_block}
 
 请选择一个合适的 action.
-**Critial Instruction**: 
-在调用工具前, 你必须先在心中回答: **"最新这条消息是发给谁的?"** (参考 Context 中的对话流向). 
-不要默认消息是发给你的, 只有当你确信需要回应时才行动.
-
-**Action Selection Requirements**
-{plan_style}
-{moderation_prompt}
-
-请使用 Tool Calls 来执行 actions.
 """,
         "planner_prompt",
     )
 
     Prompt(
         """{time_block}
-{name_block}
 {chat_context_description}, 以下是具体的聊天内容
 **聊天内容**
 {chat_content_block}
@@ -74,9 +62,6 @@ def init_prompt():
 请根据聊天内容, 用户的最新消息和以下标准选择合适的 action:
 1. 思考**所有**的可用的 action 中的**每个动作**是否符合当下条件, 如果动作使用条件符合聊天内容就使用
 2. 如果相同的内容已经被执行, 请不要重复执行
-{moderation_prompt}
-
-请使用 Tool Calls 来执行 actions. 你可以同时调用多个 tools.
 """,
         "planner_prompt_mentioned",
     )
@@ -736,15 +721,39 @@ class ActionPlanner:
             # Build tools from filtered actions
             tools = self._convert_actions_to_tools(filtered_actions)
 
-            # 调用LLM
-            llm_content, (reasoning_content, _, tool_calls) = await self.planner_llm.generate_response_async(
-                prompt=prompt,
-                tools=tools
+            # 构建相对稳定的 system 提示词（身份与行为规范），用于提升缓存命中率
+            moderation_prompt_block = "请不要输出违法违规内容，不要输出色情，暴力，政治相关内容，如有敏感内容，请规避。"
+            bot_name = global_config.bot.nickname
+            bot_nickname = (
+                f",也有人叫你{','.join(global_config.bot.alias_names)}" if global_config.bot.alias_names else ""
+            )
+            name_line = f"你的名字是{bot_name}{bot_nickname}，请注意哪些是你自己的发言。"
+
+            system_prompt = (
+                f"{name_line}\n"
+                f"你的兴趣是: {global_config.personality.interest}\n"
+                "你是 MaiBot 的动作规划器，负责根据聊天上下文选择并执行合适的动作（通过 Tool Calls）。\n\n"
+                "在调用工具前, 你必须先在心中回答: \"最新这条消息是发给谁的?\" (参考 Context 中的对话流向)。\n"
+                "不要默认消息是发给你的, 只有当你确信需要回应时才行动。\n\n"
+                "**Action Selection Requirements**\n"
+                f"{global_config.personality.plan_style}\n"
+                f"{moderation_prompt_block}\n\n"
+                "请使用 Tool Calls 来执行 actions。\n"
+            )
+
+            # 调用LLM，使用 system + user 分离的消息结构
+            llm_content, (reasoning_content, _, tool_calls) = (
+                await self.planner_llm.generate_response_with_system_user_async(
+                    system_prompt=system_prompt,
+                    user_prompt=prompt,
+                    tools=tools,
+                )
             )
             
             reasoning_text = reasoning_content or llm_content or ""
 
             if global_config.debug.show_planner_prompt:
+                logger.info(f"{self.log_prefix}规划器 system 提示词: {system_prompt}")
                 logger.info(f"{self.log_prefix}规划器原始提示词: {prompt}")
                 logger.info(f"{self.log_prefix}规划器原始响应: {llm_content}")
                 if reasoning_content:

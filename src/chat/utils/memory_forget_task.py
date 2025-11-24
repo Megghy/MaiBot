@@ -70,38 +70,15 @@ class MemoryForgetTask(AsyncTask):
                 return
 
             # 选择要删除的记录（处理count相同的情况：随机选择）
-            to_delete = []
-            to_delete.extend(self._handle_same_count_random(candidates, delete_count, "high"))
-            to_delete.extend(self._handle_same_count_random(candidates, delete_count, "low"))
-
             # 去重（避免重复删除），使用id去重
-            seen_ids = set()
-            unique_to_delete = []
-            for record in to_delete:
-                if record.id not in seen_ids:
-                    seen_ids.add(record.id)
-                    unique_to_delete.append(record)
-            to_delete = unique_to_delete
-
             # 删除记录并更新forget_times
-            deleted_count = 0
-            for record in to_delete:
-                try:
-                    record.delete_instance()
-                    deleted_count += 1
-                except Exception as e:
-                    logger.error(f"[记忆遗忘-阶段1] 删除记录失败: {e}")
-
             # 更新剩余记录的forget_times为1
-            to_delete_ids = {r.id for r in to_delete}
-            remaining = [r for r in candidates if r.id not in to_delete_ids]
-            if remaining:
-                # 批量更新
-                ids_to_update = [r.id for r in remaining]
-                ChatHistory.update(forget_times=1).where(ChatHistory.id.in_(ids_to_update)).execute()
-
-            logger.info(
-                f"[记忆遗忘-阶段1] 完成：删除了 {deleted_count} 条记忆，更新了 {len(remaining)} 条记忆的forget_times为1"
+            self._execute_forget_for_candidates(
+                candidates=candidates,
+                delete_count=delete_count,
+                stage_label="1",
+                next_forget_times=1,
+                use_id_dedup=True,
             )
 
         except Exception as e:
@@ -140,31 +117,14 @@ class MemoryForgetTask(AsyncTask):
                 return
 
             # 选择要删除的记录
-            to_delete = []
-            to_delete.extend(self._handle_same_count_random(candidates, delete_count, "high"))
-            to_delete.extend(self._handle_same_count_random(candidates, delete_count, "low"))
-
             # 去重
-            to_delete = list(set(to_delete))
-
             # 删除记录
-            deleted_count = 0
-            for record in to_delete:
-                try:
-                    record.delete_instance()
-                    deleted_count += 1
-                except Exception as e:
-                    logger.error(f"[记忆遗忘-阶段2] 删除记录失败: {e}")
-
             # 更新剩余记录的forget_times为2
-            to_delete_ids = {r.id for r in to_delete}
-            remaining = [r for r in candidates if r.id not in to_delete_ids]
-            if remaining:
-                ids_to_update = [r.id for r in remaining]
-                ChatHistory.update(forget_times=2).where(ChatHistory.id.in_(ids_to_update)).execute()
-
-            logger.info(
-                f"[记忆遗忘-阶段2] 完成：删除了 {deleted_count} 条记忆，更新了 {len(remaining)} 条记忆的forget_times为2"
+            self._execute_forget_for_candidates(
+                candidates=candidates,
+                delete_count=delete_count,
+                stage_label="2",
+                next_forget_times=2,
             )
 
         except Exception as e:
@@ -203,31 +163,14 @@ class MemoryForgetTask(AsyncTask):
                 return
 
             # 选择要删除的记录
-            to_delete = []
-            to_delete.extend(self._handle_same_count_random(candidates, delete_count, "high"))
-            to_delete.extend(self._handle_same_count_random(candidates, delete_count, "low"))
-
             # 去重
-            to_delete = list(set(to_delete))
-
             # 删除记录
-            deleted_count = 0
-            for record in to_delete:
-                try:
-                    record.delete_instance()
-                    deleted_count += 1
-                except Exception as e:
-                    logger.error(f"[记忆遗忘-阶段3] 删除记录失败: {e}")
-
             # 更新剩余记录的forget_times为3
-            to_delete_ids = {r.id for r in to_delete}
-            remaining = [r for r in candidates if r.id not in to_delete_ids]
-            if remaining:
-                ids_to_update = [r.id for r in remaining]
-                ChatHistory.update(forget_times=3).where(ChatHistory.id.in_(ids_to_update)).execute()
-
-            logger.info(
-                f"[记忆遗忘-阶段3] 完成：删除了 {deleted_count} 条记忆，更新了 {len(remaining)} 条记忆的forget_times为3"
+            self._execute_forget_for_candidates(
+                candidates=candidates,
+                delete_count=delete_count,
+                stage_label="3",
+                next_forget_times=3,
             )
 
         except Exception as e:
@@ -266,35 +209,63 @@ class MemoryForgetTask(AsyncTask):
                 return
 
             # 选择要删除的记录
-            to_delete = []
-            to_delete.extend(self._handle_same_count_random(candidates, delete_count, "high"))
-            to_delete.extend(self._handle_same_count_random(candidates, delete_count, "low"))
-
             # 去重
-            to_delete = list(set(to_delete))
-
             # 删除记录
-            deleted_count = 0
-            for record in to_delete:
-                try:
-                    record.delete_instance()
-                    deleted_count += 1
-                except Exception as e:
-                    logger.error(f"[记忆遗忘-阶段4] 删除记录失败: {e}")
-
             # 更新剩余记录的forget_times为4
-            to_delete_ids = {r.id for r in to_delete}
-            remaining = [r for r in candidates if r.id not in to_delete_ids]
-            if remaining:
-                ids_to_update = [r.id for r in remaining]
-                ChatHistory.update(forget_times=4).where(ChatHistory.id.in_(ids_to_update)).execute()
-
-            logger.info(
-                f"[记忆遗忘-阶段4] 完成：删除了 {deleted_count} 条记忆，更新了 {len(remaining)} 条记忆的forget_times为4"
+            self._execute_forget_for_candidates(
+                candidates=candidates,
+                delete_count=delete_count,
+                stage_label="4",
+                next_forget_times=4,
             )
 
         except Exception as e:
             logger.error(f"[记忆遗忘-阶段4] 执行失败: {e}", exc_info=True)
+
+    def _execute_forget_for_candidates(
+        self,
+        candidates: List[ChatHistory],
+        delete_count: int,
+        stage_label: str,
+        next_forget_times: int,
+        use_id_dedup: bool = False,
+    ):
+        to_delete: List[ChatHistory] = []
+        to_delete.extend(self._handle_same_count_random(candidates, delete_count, "high"))
+        to_delete.extend(self._handle_same_count_random(candidates, delete_count, "low"))
+
+        if use_id_dedup:
+            seen_ids = set()
+            unique_to_delete: List[ChatHistory] = []
+            for record in to_delete:
+                if record.id not in seen_ids:
+                    seen_ids.add(record.id)
+                    unique_to_delete.append(record)
+            to_delete = unique_to_delete
+        else:
+            to_delete = list(set(to_delete))
+
+        to_delete_ids = {r.id for r in to_delete}
+        deleted_count = 0
+        if to_delete_ids:
+            try:
+                deleted_count = (
+                    ChatHistory.delete().where(ChatHistory.id.in_(to_delete_ids)).execute()
+                )
+            except Exception as e:
+                logger.error(f"[记忆遗忘-阶段{stage_label}] 批量删除记录失败: {e}")
+
+        remaining = [r for r in candidates if r.id not in to_delete_ids]
+        if remaining:
+            ids_to_update = [r.id for r in remaining]
+            ChatHistory.update(forget_times=next_forget_times).where(
+                ChatHistory.id.in_(ids_to_update)
+            ).execute()
+
+        logger.info(
+            f"[记忆遗忘-阶段{stage_label}] 完成：删除了 {deleted_count} 条记忆，"
+            f"更新了 {len(remaining)} 条记忆的forget_times为{next_forget_times}"
+        )
 
     def _handle_same_count_random(
         self, candidates: List[ChatHistory], delete_count: int, mode: str

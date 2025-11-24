@@ -10,7 +10,7 @@ from typing import Union, Optional, Callable, List
 
 from src.common.logger import get_logger
 from src.common.database.database import db
-from src.common.database.database_model import PersonInfo
+from src.common.database.database_model import PersonInfo, PersonGroupMemory
 from src.llm_models.utils_model import LLMRequest
 from src.config.config import global_config, model_config
 from src.chat.message_receive.chat_stream import get_chat_manager
@@ -296,6 +296,7 @@ class Person:
         self.memory_points: List[str] = []
         self.group_nick_name: List[dict[str, str]] = []
         self.is_known = False
+        self._group_memory_cache: dict[str, List[str]] = {}
 
         if platform == global_config.bot.platform and user_id == global_config.bot.qq_account:
             self.is_known = True
@@ -552,6 +553,131 @@ class Person:
              return random.sample(memory_list, num)
 
         return [m[1] for m in scored_memories[:num]]
+
+    def get_group_memory_points(self, group_id: str) -> List[str]:
+        group_id = (group_id or "").strip()
+        if not group_id:
+            return []
+
+        cache = getattr(self, "_group_memory_cache", None)
+        if cache is None:
+            cache = {}
+            self._group_memory_cache = cache
+
+        if group_id in cache:
+            return cache[group_id]
+
+        memory_points: List[str] = []
+        try:
+            record = PersonGroupMemory.get_or_none(
+                (PersonGroupMemory.person_id == self.person_id) & (PersonGroupMemory.group_id == group_id)
+            )
+            if record and record.memory_points:
+                loaded_points = json.loads(record.memory_points)
+                if isinstance(loaded_points, list):
+                    memory_points = [p for p in loaded_points if isinstance(p, str) and p.strip()]
+        except Exception as e:
+            logger.warning(f"解析用户 {self.person_id} 在群 {group_id} 的记忆失败: {e}")
+
+        cache[group_id] = memory_points
+        return memory_points
+
+    def add_group_memory_point(
+        self,
+        group_id: str,
+        memory_content: str,
+        *,
+        category: Optional[str] = None,
+        weight: float = 1.0,
+        similarity_fn: Optional[Callable[[str, str], float]] = None,
+    ) -> bool:
+        if not self.is_known:
+            logger.debug(f"用户 {self.person_id} 尚未被标记为已认识，无法添加群记忆")
+            return False
+
+        group_id = (group_id or "").strip()
+        if not group_id:
+            return False
+
+        memory_content = (memory_content or "").strip()
+        if not memory_content:
+            return False
+
+        similarity_fn = similarity_fn or calculate_string_similarity
+        category = _normalize_category(category or infer_memory_category(memory_content))
+        weight_value = _normalize_weight(weight)
+
+        memory_points = self.get_group_memory_points(group_id)
+
+        duplicate_idx = None
+        for idx, point in enumerate(memory_points):
+            if not isinstance(point, str):
+                continue
+            point_category = get_category_from_memory(point)
+            if point_category != category:
+                continue
+            existing_content = get_memory_content_from_memory(point)
+            similarity = similarity_fn(existing_content, memory_content)
+            if similarity >= MEMORY_SIMILARITY_THRESHOLD:
+                duplicate_idx = idx
+                break
+
+        if duplicate_idx is not None:
+            existing_point = memory_points[duplicate_idx]
+            merged_weight = _normalize_weight(
+                (get_weight_from_memory(existing_point) + weight_value) / 2 + 0.05
+            )
+            updated_point = f"{category}:{memory_content}:{merged_weight}"
+            memory_points[duplicate_idx] = updated_point
+            logger.debug(f"更新已存在的群记忆点: {updated_point}")
+        else:
+            # 按分类和总量控制群记忆容量
+            category_points = [p for p in memory_points if get_category_from_memory(p) == category]
+            if len(category_points) >= MAX_MEMORY_POINTS_PER_CATEGORY:
+                lowest_idx = None
+                lowest_weight = math.inf
+                for idx, point in enumerate(memory_points):
+                    if get_category_from_memory(point) != category:
+                        continue
+                    weight_value_existing = get_weight_from_memory(point)
+                    if weight_value_existing < lowest_weight:
+                        lowest_weight = weight_value_existing
+                        lowest_idx = idx
+                if lowest_idx is not None:
+                    removed_point = memory_points.pop(lowest_idx)
+                    logger.debug(f"移除群记忆点以腾出空间: {removed_point}")
+
+            if len(memory_points) >= MAX_MEMORY_POINTS:
+                lowest_idx = None
+                lowest_weight = math.inf
+                for idx, point in enumerate(memory_points):
+                    if not isinstance(point, str):
+                        continue
+                    weight_value_existing = get_weight_from_memory(point)
+                    if weight_value_existing < lowest_weight:
+                        lowest_weight = weight_value_existing
+                        lowest_idx = idx
+                if lowest_idx is not None:
+                    removed_point = memory_points.pop(lowest_idx)
+                    logger.debug(f"移除群记忆点以腾出空间: {removed_point}")
+
+            new_point = f"{category}:{memory_content}:{weight_value}"
+            memory_points.append(new_point)
+            logger.debug(f"新增群记忆点: {new_point}")
+
+        try:
+            record, created = PersonGroupMemory.get_or_create(
+                person_id=self.person_id,
+                group_id=group_id,
+                defaults={"memory_points": json.dumps(memory_points, ensure_ascii=False)},
+            )
+            if not created:
+                record.memory_points = json.dumps(memory_points, ensure_ascii=False)
+                record.save()
+            return True
+        except Exception as e:
+            logger.error(f"同步用户 {self.person_id} 在群 {group_id} 的群记忆到数据库时出错: {e}")
+            return False
 
     def add_group_nick_name(self, group_id: str, group_nick_name: str):
         """
@@ -942,6 +1068,12 @@ async def store_person_memory_from_answer(person_name: str, memory_content: str,
             return
 
         platform = chat_stream.platform
+        group_id: Optional[str] = None
+        if getattr(chat_stream, "group_info", None):
+            try:
+                group_id = chat_stream.group_info.group_id  # type: ignore[attr-defined]
+            except Exception:
+                group_id = None
 
         if person_name == global_config.bot.nickname:
             person = Person(platform=global_config.bot.platform, user_id=global_config.bot.qq_account)
@@ -967,10 +1099,18 @@ async def store_person_memory_from_answer(person_name: str, memory_content: str,
             return
 
         category = infer_memory_category(memory_content)
-        added = person.add_memory_point(memory_content, category=category, weight=1.0)
+
+        # 群聊与私聊的记忆作用域区分：
+        # - 群聊：记忆只写入对应群的群级记忆（PersonGroupMemory），不写入全局
+        # - 私聊：记忆写入全局 memory_points
+        if group_id:
+            added = person.add_group_memory_point(group_id, memory_content, category=category, weight=1.0)
+        else:
+            added = person.add_memory_point(memory_content, category=category, weight=1.0)
 
         if added:
-            logger.info(f"成功添加人物记忆：{person_name} -> {memory_content}")
+            scope = f"群 {group_id}" if group_id else "全局"
+            logger.info(f"成功添加人物记忆（{scope}）：{person_name} -> {memory_content}")
         else:
             logger.debug(f"未能添加人物记忆（可能重复）：{person_name} -> {memory_content}")
 

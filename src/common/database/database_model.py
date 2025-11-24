@@ -278,6 +278,16 @@ class PersonInfo(BaseModel):
         table_name = "person_info"
 
 
+class PersonGroupMemory(BaseModel):
+    person_id = TextField(index=True)
+    group_id = TextField(index=True)
+    memory_points = TextField(null=True)
+
+    class Meta:
+        table_name = "person_group_memory"
+        indexes = ((("person_id", "group_id"), True),)
+
+
 class GroupInfo(BaseModel):
     """
     用于存储群组信息数据的模型。
@@ -391,6 +401,7 @@ MODELS = [
     ImageDescriptions,
     OnlineTime,
     PersonInfo,
+    PersonGroupMemory,
     Expression,
     ActionRecords,
     Jargon,
