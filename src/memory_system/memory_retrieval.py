@@ -1473,8 +1473,6 @@ async def build_memory_retrieval_prompt(
             fallback_reason = None
             if _should_use_fallback_question(target, has_recent_query_history=has_recent_query_history):
                 fallback_reason = "heuristic"
-            elif not concepts:
-                fallback_reason = "no_concepts"
             elif concepts and not concept_info_found:
                 fallback_reason = "concepts_without_results"
 
