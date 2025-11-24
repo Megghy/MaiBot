@@ -1424,7 +1424,7 @@ async def build_memory_retrieval_prompt(
             if _should_use_fallback_question(target, has_recent_query_history=has_recent_query_history):
                 fallback = _build_fallback_question(sender, target)
                 if fallback:
-                    logger.info("问题列表为空，使用自动回退问题")
+                    logger.info(f"问题列表为空，使用自动回退问题: {fallback}")
                     questions = [fallback]
             else:
                 logger.info("问题列表为空，且启发式判断无需触发回退问题")
@@ -1436,8 +1436,6 @@ async def build_memory_retrieval_prompt(
             concepts,
             questions,
         )
-
-        logger.info(f"解析到 {len(questions)} 个问题: {questions}")
 
         # 第二步：并行处理所有问题（使用配置的最大迭代次数/120秒超时）
         max_iterations = global_config.memory.max_agent_iterations
