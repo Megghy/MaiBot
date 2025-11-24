@@ -942,20 +942,25 @@ async def store_person_memory_from_answer(person_name: str, memory_content: str,
             return
 
         platform = chat_stream.platform
-        person_id = get_person_id_by_person_name(person_name)
-        if not person_id:
-            person_id = get_person_id_by_alias(person_name)
 
-        if not person_id and chat_stream.user_info:
-            user_nickname = (chat_stream.user_info.user_nickname or "").strip()
-            if user_nickname and user_nickname == person_name:
-                person_id = get_person_id(platform, chat_stream.user_info.user_id)
+        if person_name == global_config.bot.nickname:
+            person = Person(platform=global_config.bot.platform, user_id=global_config.bot.qq_account)
+            person_id = person.person_id
+        else:
+            person_id = get_person_id_by_person_name(person_name)
+            if not person_id:
+                person_id = get_person_id_by_alias(person_name)
 
-        if not person_id:
-            logger.warning(f"无法确定person_id，person_name: {person_name}, chat_id: {chat_id}")
-            return
+            if not person_id and chat_stream.user_info:
+                user_nickname = (chat_stream.user_info.user_nickname or "").strip()
+                if user_nickname and user_nickname == person_name:
+                    person_id = get_person_id(platform, chat_stream.user_info.user_id)
 
-        person = Person(person_id=person_id)
+            if not person_id:
+                logger.warning(f"无法确定person_id，person_name: {person_name}, chat_id: {chat_id}")
+                return
+
+            person = Person(person_id=person_id)
 
         if not person.is_known:
             logger.warning(f"用户 {person_name} (person_id: {person_id}) 尚未认识，无法存储记忆")

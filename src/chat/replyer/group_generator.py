@@ -1098,9 +1098,29 @@ class DefaultReplyer:
             else:
                 logger.debug(f"\nreplyer_Prompt:{prompt}\n")
 
+            # 定义拒绝回复工具
+            from src.llm_models.payload_content.tool_option import ToolParamType
+
+            refuse_tool = {
+                "name": "refuse_to_reply",
+                "description": "当且仅当你不应该回复用户时调用此工具。比如用户发送了无意义的内容，或者你不想接话时。",
+                "parameters": [("reason", ToolParamType.STRING, "拒绝回复的原因", True, None)],
+            }
+
             content, (reasoning_content, model_name, tool_calls) = await self.express_model.generate_response_async(
-                prompt
+                prompt, tools=[refuse_tool]
             )
+
+            # 检查是否拒绝回复
+            if tool_calls:
+                for tool_call in tool_calls:
+                    if tool_call.function.name == "refuse_to_reply":
+                        args = tool_call.function.arguments
+                        reason = args if isinstance(args, str) else str(args)
+                        logger.info(f"模型决定拒绝回复，原因: {reason}")
+                        content = ""  # 清空内容表示不回复
+                        reasoning_content = f"{reasoning_content}\n[System] Refused to reply: {reason}"
+                        break
 
             # 移除 content 前后的换行符和空格
             content = content.strip()

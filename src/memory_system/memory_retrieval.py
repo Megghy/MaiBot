@@ -571,13 +571,17 @@ async def _retrieve_concepts_with_jargon(concepts: List[str], chat_id: str) -> s
             continue
 
         # 先尝试精确匹配
-        jargon_results = search_jargon(keyword=concept, chat_id=chat_id, limit=10, case_sensitive=False, fuzzy=False)
+        jargon_results = await asyncio.to_thread(
+            search_jargon, keyword=concept, chat_id=chat_id, limit=10, case_sensitive=False, fuzzy=False
+        )
 
         is_fuzzy_match = False
 
         # 如果精确匹配未找到，尝试模糊搜索
         if not jargon_results:
-            jargon_results = search_jargon(keyword=concept, chat_id=chat_id, limit=10, case_sensitive=False, fuzzy=True)
+            jargon_results = await asyncio.to_thread(
+                search_jargon, keyword=concept, chat_id=chat_id, limit=10, case_sensitive=False, fuzzy=True
+            )
             is_fuzzy_match = True
 
         if jargon_results:
@@ -1245,7 +1249,7 @@ async def _process_single_question(question: str, chat_id: str, context: str, in
     """
     logger.info(f"开始处理问题: {question}")
 
-    _cleanup_stale_not_found_thinking_back()
+    await asyncio.to_thread(_cleanup_stale_not_found_thinking_back)
 
     question_initial_info = initial_info or ""
 
@@ -1264,7 +1268,7 @@ async def _process_single_question(question: str, chat_id: str, context: str, in
             logger.error(f"LPMM预查询失败，问题: {question[:50]}... 错误: {e}")
 
     # 先检查thinking_back数据库中是否有现成答案
-    cached_result = _query_thinking_back(chat_id, question)
+    cached_result = await asyncio.to_thread(_query_thinking_back, chat_id, question)
     should_requery = False
 
     if cached_result:
@@ -1313,7 +1317,8 @@ async def _process_single_question(question: str, chat_id: str, context: str, in
 
         # 存储到数据库（超时时不存储）
         if not is_timeout:
-            _store_thinking_back(
+            await asyncio.to_thread(
+                _store_thinking_back,
                 chat_id=chat_id,
                 question=question,
                 context=context,
@@ -1365,11 +1370,13 @@ async def build_memory_retrieval_prompt(
         chat_id = chat_stream.stream_id
 
         # 获取最近查询历史（最近1小时内的查询）
-        recent_query_history_raw = _get_recent_query_history(chat_id, time_window_seconds=300.0)
+        recent_query_history_raw = await asyncio.to_thread(
+            _get_recent_query_history, chat_id, time_window_seconds=300.0
+        )
         has_recent_query_history = bool(recent_query_history_raw)
         recent_query_history = recent_query_history_raw or "最近没有查询记录。"
 
-        participant_hints = _build_participant_hints(chat_id)
+        participant_hints = await asyncio.to_thread(_build_participant_hints, chat_id)
 
         keywords = _extract_keywords(target)
         focus_summary = _build_focus_summary(message, target, keywords)
@@ -1418,7 +1425,7 @@ async def build_memory_retrieval_prompt(
                 logger.info("概念检索未找到任何结果")
 
         # 获取缓存的记忆（与question时使用相同的时间窗口和数量限制）
-        cached_memories = _get_cached_memories(chat_id, time_window_seconds=300.0)
+        cached_memories = await asyncio.to_thread(_get_cached_memories, chat_id, time_window_seconds=300.0)
 
         if not questions:
             if _should_use_fallback_question(target, has_recent_query_history=has_recent_query_history):
