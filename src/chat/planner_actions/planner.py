@@ -68,6 +68,9 @@ def init_prompt():
 **Action Records**
 {actions_before_now_block}
 
+**Available Actions**
+{action_options_text}
+
 请选择一个合适的 action.
 首先, 思考你的选择理由, 然后使用 tool calls 来执行 action.
 **Action Selection Requirements**
