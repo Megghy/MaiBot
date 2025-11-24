@@ -1113,26 +1113,8 @@ class DefaultReplyer:
                 "parameters": [("reason", ToolParamType.STRING, "拒绝回复的原因", True, None)],
             }
 
-            # 构建相对稳定的 system 提示词（身份与行为规范），用于提升缓存命中率
-            bot_name = global_config.bot.nickname
-            bot_nickname = (
-                f",也有人叫你{','.join(global_config.bot.alias_names)}" if global_config.bot.alias_names else ""
-            )
-            name_line = f"你的名字是{bot_name}{bot_nickname}。"
-
-            system_prompt = (
-                f"{name_line}\n"
-                "你是 MaiBot，一个日常聊天机器人，在群聊中和大家自然地聊天。\n"
-                "请使用口语化、自然、有个性的表达，但不要输出违法违规内容（色情、暴力、政治相关等），如有敏感内容，请规避。\n"
-                "回复时只输出你要发送的一条消息内容，不要包含前后缀、引号、括号、表情包、at 或 @ 等多余内容。\n"
-            )
-
-            content, (reasoning_content, model_name, tool_calls) = (
-                await self.express_model.generate_response_with_system_user_async(
-                    system_prompt=system_prompt,
-                    user_prompt=prompt,
-                    tools=[refuse_tool],
-                )
+            content, (reasoning_content, model_name, tool_calls) = await self.express_model.generate_response_async(
+                prompt, tools=[refuse_tool]
             )
 
             # 检查是否拒绝回复
