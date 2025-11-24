@@ -30,6 +30,7 @@ from src.plugin_system.apis.message_api import translate_pid_to_description
 
 # from src.memory_system.memory_activator import MemoryActivator
 from src.person_info.person_info import Person
+from src.chat.replyer.replyer_utils import build_person_memory_block
 from src.plugin_system.base.component_types import ActionInfo, EventType
 from src.plugin_system.apis import llm_api
 
@@ -749,14 +750,18 @@ class DefaultReplyer:
         sender = "用户"
         target = "消息"
 
+        target_person: Optional[Person] = None
         if reply_message:
             user_id = reply_message.user_info.user_id
             person = Person(platform=platform, user_id=user_id)
+            target_person = person
             person_name = person.person_name or user_id
             sender = person_name
             target = reply_message.processed_plain_text
 
         target = replace_user_references(target, chat_stream.platform, replace_bot_name=True)
+
+        person_memory_block = build_person_memory_block(target_person)
 
         # 在picid替换之前分析内容类型（防止prompt注入）
         has_only_pics, has_text, pic_part, text_part = self._analyze_target_content(target)
@@ -926,6 +931,7 @@ class DefaultReplyer:
             memory_retrieval=memory_retrieval,
             chat_prompt=chat_prompt_block,
             planner_reasoning=planner_reasoning,
+            person_memory_block=person_memory_block,
         ), selected_expressions
 
     async def build_prompt_rewrite_context(

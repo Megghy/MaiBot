@@ -45,7 +45,9 @@ def init_prompt():
 {actions_before_now_block}
 
 请选择一个合适的 action.
-首先, 思考你的选择理由, 然后使用 tool calls 来执行 action.
+**Critial Instruction**: 
+在调用工具前, 你必须先在心中回答: **"最新这条消息是发给谁的?"** (参考 Context 中的对话流向). 
+不要默认消息是发给你的, 只有当你确信需要回应时才行动.
 
 **Action Selection Requirements**
 {plan_style}

@@ -96,8 +96,9 @@ class MainSystem:
         # 添加在线时间统计任务
         await async_task_manager.add_task(OnlineTimeRecordTask())
 
-        # 添加统计信息输出任务
-        await async_task_manager.add_task(StatisticOutputTask())
+        # 添加统计信息输出任务（可配置）
+        if getattr(global_config.statistic, "enable_output", False):
+            await async_task_manager.add_task(StatisticOutputTask())
 
         # 添加聊天流统计任务（每5分钟生成一次报告，统计最近30天的数据）
         # await async_task_manager.add_task(TokenStatisticsTask())

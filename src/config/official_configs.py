@@ -572,6 +572,14 @@ class TelemetryConfig(ConfigBase):
 
 
 @dataclass
+class StatisticConfig(ConfigBase):
+    """统计输出配置"""
+
+    enable_output: bool = False
+    """是否输出统计信息"""
+
+
+@dataclass
 class DebugConfig(ConfigBase):
     """调试配置类"""
 

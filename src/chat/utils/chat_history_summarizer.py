@@ -15,7 +15,7 @@ from src.config.config import global_config, model_config
 from src.llm_models.utils_model import LLMRequest
 from src.plugin_system.apis import message_api
 from src.chat.utils.chat_message_builder import build_readable_messages
-from src.person_info.person_info import Person
+from src.person_info.person_info import Person, store_person_memory_from_answer
 from src.chat.message_receive.chat_stream import get_chat_manager
 
 logger = get_logger("chat_history_summarizer")
@@ -55,6 +55,9 @@ class ChatHistorySummarizer:
         # LLM请求器，用于压缩聊天内容
         self.summarizer_llm = LLMRequest(
             model_set=model_config.model_task_config.utils, request_type="chat_history_summarizer"
+        )
+        self.memory_organizer_llm = LLMRequest(
+            model_set=model_config.model_task_config.utils_small, request_type="chat_memory_memory_points"
         )
 
         # 后台循环相关
@@ -285,6 +288,12 @@ class ChatHistorySummarizer:
                 summary=summary,
             )
 
+            await self._organize_memory_points(
+                participants=participants,
+                summary=summary,
+                original_text=original_text,
+            )
+
             logger.info(f"{self.log_prefix} 成功打包并存储聊天记录 | 消息数: {len(messages)} | 主题: {theme}")
 
             # 清空当前批次
@@ -450,6 +459,81 @@ class ChatHistorySummarizer:
 
             traceback.print_exc()
             raise
+
+    async def _organize_memory_points(self, participants: List[str], summary: str, original_text: str):
+        """基于话题总结统一梳理 memory_points"""
+        if not participants or not summary:
+            return
+
+        trimmed_summary = summary.strip()
+        trimmed_original = (original_text or "").strip()
+        if len(trimmed_original) > 2000:
+            trimmed_original = trimmed_original[:2000]
+
+        prompt = f"""你是一个对话分析助手。请根据提供的聊天话题概括，为参与者整理可写入个性记忆的要点。
+
+参与者：{participants}
+话题概括：{trimmed_summary}
+补充原文片段（可为空）：{trimmed_original}
+
+请输出JSON数组，每个元素格式：
+{{
+  "person_name": "参与者姓名，必须出现在参与者列表中",
+  "memory_points": ["第一条记忆", "第二条记忆"],
+  "confidence": 0 到 1 的数字
+}}
+
+要求：
+1. 仅在记忆与该参与者密切相关时输出条目。
+2. 每个 memory_points 文本不超过 20 字，聚焦事实或稳定偏好。
+3. 如果没有任何记忆，请返回 []。
+"""
+
+        try:
+            response, _ = await self.memory_organizer_llm.generate_response_async(
+                prompt=prompt,
+                temperature=0.4,
+                max_tokens=600,
+            )
+
+            json_str = response.strip()
+            json_str = json_str.replace("```json", "").replace("```", "").strip()
+
+            parsed = json.loads(json_str or "[]")
+            if isinstance(parsed, dict):
+                parsed_entries = [parsed]
+            elif isinstance(parsed, list):
+                parsed_entries = parsed
+            else:
+                parsed_entries = []
+
+            participant_set = {p for p in participants if isinstance(p, str) and p}
+
+            for entry in parsed_entries:
+                if not isinstance(entry, dict):
+                    continue
+                person_name = (entry.get("person_name") or "").strip()
+                if person_name not in participant_set:
+                    continue
+                confidence = entry.get("confidence")
+                try:
+                    if confidence is not None and float(confidence) < 0.5:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+
+                memory_points = entry.get("memory_points") or []
+                if isinstance(memory_points, str):
+                    memory_points = [memory_points]
+
+                for memory_text in memory_points[:3]:
+                    memory_text = (memory_text or "").strip()
+                    if not memory_text:
+                        continue
+                    await store_person_memory_from_answer(person_name, memory_text[:120], self.chat_id)
+
+        except Exception as exc:
+            logger.warning(f"{self.log_prefix} 梳理记忆点失败: {exc}")
 
     async def start(self):
         """启动后台定期检查循环"""

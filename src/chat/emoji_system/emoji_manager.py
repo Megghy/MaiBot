@@ -940,12 +940,19 @@ class EmojiManager:
                     image_base64 = get_image_manager().transform_gif(image_base64)  # type: ignore
                     if not image_base64:
                         raise RuntimeError("GIF表情包转换失败")
-                    prompt = "这是一个动态图表情包，每一张图代表了动态图的某一帧，黑色背景代表透明，简短描述一下表情包表达的情感和内容，从互联网梗,meme的角度去分析，最多 200到400字"
+                    prompt = (
+                        "这是一个动态图表情包。请直接用一句话概括它的情绪和梗点，"
+                        "限制在100字以内，侧重表达含义和使用场景，不要写格式或画面细节，"
+                        "也不要出现诸如‘好的，我们来’之类的开场。"
+                    )
                     description, _ = await self.vlm.generate_response_for_image(
                         prompt, image_base64, "jpg", temperature=0.5
                     )
                 else:
-                    prompt = "这是一个表情包，请详细描述一下表情包所表达的情感和内容，简短描述细节，从互联网梗,meme的角度去分析.最多 200到400字"
+                    prompt = (
+                        "这是一个表情包。请用一句紧凑的话概括它表达的情绪、梗点或使用场景，"
+                        "控制在100字以内，聚焦含义，不要描写图像细节，也不要出现寒暄。"
+                    )
                     description, _ = await self.vlm.generate_response_for_image(
                         prompt, image_base64, image_format, temperature=0.5
                     )
@@ -987,7 +994,7 @@ class EmojiManager:
             elif len(emotions) > 2:
                 emotions = random.sample(emotions, 2)
 
-            logger.info(f"[注册分析] 详细描述: {description[:50]}... -> 情感标签: {emotions}")
+            logger.info(f"[注册分析] 描述: {description[:50]}... -> 情感标签: {emotions}")
 
             return f"[表情包：{description}]", emotions
 
