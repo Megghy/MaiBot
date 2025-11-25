@@ -798,15 +798,24 @@ class HeartFChatting:
 
                 elif action_planner_info.action_type == "reply":
                     # 使用统一的回复生成方法
-                    reason = action_planner_info.reasoning or ""
-                    planner_reasoning = action_planner_info.action_reasoning or reason
+                    reason = (action_planner_info.reasoning or "").strip()
+                    # 仅将工具返回的reason注入到replyer，不再使用action_reasoning
+                    if reason:
+                        # reasoning 由 _format_action_reasoning 构造，首段即工具的 reason，后续是代码追加的信息
+                        if " | " in reason:
+                            reply_reason = reason.split(" | ", 1)[0].strip()
+                        else:
+                            reply_reason = reason
+                    else:
+                        # 没有reason时，就不给 replyer 额外理由
+                        reply_reason = ""
                     return await self._do_reply(
                         reply_message=action_planner_info.action_message,  # type: ignore
                         thinking_id=thinking_id,
                         cycle_timers=cycle_timers,
                         available_actions=available_actions,
                         chosen_actions=chosen_action_plan_infos,
-                        reply_reason=planner_reasoning,
+                        reply_reason=reply_reason,
                         reply_time_point=action_planner_info.action_data.get("loop_start_time", time.time()) if action_planner_info.action_data else time.time(),
                     )
                 else:

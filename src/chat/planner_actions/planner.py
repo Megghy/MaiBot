@@ -444,7 +444,20 @@ class ActionPlanner:
             if isinstance(content, list) and all(isinstance(action, ActionPlannerInfo) for action in content):
                 # 这是action记录
                 if len(action_records) < max_action_records:
-                    action_records.append((reasoning, timestamp, content, "action"))
+                    # 直接使用每个动作的 reasoning（由代码构造），完全不依赖 action_reasoning 或日志解析
+                    summaries = []
+                    for action in content:
+                        try:
+                            reason_text = (action.reasoning or "").strip()
+                            if reason_text:
+                                summaries.append(f"{action.action_type}:{reason_text}")
+                            else:
+                                summaries.append(f"{action.action_type}:（无reason）")
+                        except Exception:
+                            summaries.append(f"{getattr(action, 'action_type', 'unknown')}:（无reason）")
+
+                    summary_text = " | ".join(summaries)
+                    action_records.append((summary_text, timestamp, content, "action"))
             else:
                 # 这是执行结果记录
                 if len(execution_records) < max_execution_records:
