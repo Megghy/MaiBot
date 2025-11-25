@@ -10,7 +10,7 @@ import traceback
 from src.common.logger import get_logger
 from src.config.config import model_config
 from src.config.api_ada_configs import APIProvider, ModelInfo, TaskConfig
-from .payload_content.message import MessageBuilder, Message
+from .payload_content.message import MessageBuilder, Message, RoleType
 from .payload_content.resp_format import RespFormat
 from .payload_content.tool_option import ToolOption, ToolCall, ToolOptionBuilder, ToolParamType
 from .model_client.base_client import BaseClient, APIResponse, client_registry
@@ -135,11 +135,24 @@ class LLMRequest:
         start_time = time.time()
 
         def message_factory(client: BaseClient) -> List[Message]:
-            message_builder = MessageBuilder()
+            messages: List[Message] = []
             if system_prompt:
-                message_builder.add_system_content(system_prompt)
-            message_builder.add_text_content(prompt)
-            return [message_builder.build()]
+                system_message = (
+                    MessageBuilder()
+                    .set_role(RoleType.System)
+                    .add_text_content(system_prompt)
+                    .build()
+                )
+                messages.append(system_message)
+
+            user_message = (
+                MessageBuilder()
+                .set_role(RoleType.User)
+                .add_text_content(prompt)
+                .build()
+            )
+            messages.append(user_message)
+            return messages
 
         tool_built = self._build_tool_options(tools)
 
