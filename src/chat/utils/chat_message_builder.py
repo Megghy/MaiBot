@@ -801,20 +801,23 @@ def build_readable_messages(
         actions: List[ActionRecords] = list(actions_in_range) + list(action_after_latest)
 
         inserted_count = 0
-        inserted_actions: List[Tuple[str, float, str]] = []  # (action_name, time, prompt_display)
+        inserted_actions: List[Tuple[str, float, str]] = []  # (action_name, time, content)
 
         # 将动作记录转换为消息格式
         for action in actions:
             # 只有当build_into_prompt为True时才添加动作记录
             if action.action_build_into_prompt:
+                # 优先使用动作的reasoning作为插入到提示词中的文本，其次才是显示用的prompt_display
+                action_content = (action.action_reasoning or "").strip() or str(action.action_prompt_display or "")
+
                 action_msg = MessageAndActionModel(
                     time=float(action.time),  # type: ignore
                     user_id=global_config.bot.qq_account,  # 使用机器人的QQ账号
                     user_platform=global_config.bot.platform,  # 使用机器人的平台
                     user_nickname=global_config.bot.nickname,  # 使用机器人的用户名
                     user_cardname="",  # 机器人没有群名片
-                    processed_plain_text=f"{action.action_prompt_display}",
-                    display_message=f"{action.action_prompt_display}",
+                    processed_plain_text=action_content,
+                    display_message=action_content,
                     chat_info_platform=str(action.chat_info_platform),
                     is_action_record=True,  # 添加标识字段
                     action_name=str(action.action_name),  # 保存动作名称
@@ -822,7 +825,7 @@ def build_readable_messages(
                 copy_messages.append(action_msg)
                 inserted_count += 1
                 inserted_actions.append(
-                    (str(action.action_name), float(action.time or 0), str(action.action_prompt_display or ""))
+                    (str(action.action_name), float(action.time or 0), action_content)
                 )
 
         if inserted_count > 0:
