@@ -170,8 +170,14 @@ class BaseReplyer:
             model_name = "unknown_model"
 
             try:
+                allow_refuse = True
+                if chosen_actions:
+                    allow_refuse = not any(
+                        getattr(action, "action_type", "") == "reply" for action in chosen_actions
+                    )
+
                 content, reasoning_content, model_name, tool_call = await self.llm_generate_content(
-                    prompt, system_prompt=system_prompt
+                    prompt, system_prompt=system_prompt, allow_refuse=allow_refuse
                 )
 
                 logger.info(f"replyer生成内容: {content}")
@@ -265,7 +271,12 @@ class BaseReplyer:
             traceback.print_exc()
             return False, llm_response
 
-    async def llm_generate_content(self, prompt: str, system_prompt: Optional[str] = None):
+    async def llm_generate_content(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        allow_refuse: bool = True,
+    ):
         with Timer("LLM生成", {}):
             if global_config.debug.show_replyer_prompt:
                 logger.info(f"\n{prompt}\n")
@@ -277,18 +288,23 @@ class BaseReplyer:
             # 定义拒绝回复工具
             from src.llm_models.payload_content.tool_option import ToolParamType
 
-            refuse_tool = {
-                "name": "refuse_to_reply",
-                "description": "当且仅当你不应该回复用户时调用此工具。比如用户发送了无意义的内容，或者你不想接话时。",
-                "parameters": [("reason", ToolParamType.STRING, "拒绝回复的原因", True, None)],
-            }
+            tools = None
+            tool_calls = None
+
+            if allow_refuse:
+                refuse_tool = {
+                    "name": "refuse_to_reply",
+                    "description": "仅在以下极端情况下才调用此工具: 用户内容明显违法违规、存在严重人身攻击/辱骂，或内容完全无法理解(例如乱码)。不要仅因为内容重复、无聊或你主观上不想回复就调用此工具。当上文中的 Planner 已经决定要进行回复时，除非出现这些极端情况，否则不要调用此工具。",
+                    "parameters": [("reason", ToolParamType.STRING, "拒绝回复的原因", True, None)],
+                }
+                tools = [refuse_tool]
 
             content, (reasoning_content, model_name, tool_calls) = await self.express_model.generate_response_async(
-                prompt, tools=[refuse_tool], system_prompt=system_prompt
+                prompt, tools=tools, system_prompt=system_prompt
             )
 
             # 检查是否拒绝回复
-            if tool_calls:
+            if allow_refuse and tool_calls:
                 for tool_call in tool_calls:
                     # ToolCall 是自定义封装类，使用 func_name/args 字段
                     tool_name = getattr(tool_call, "func_name", None)
