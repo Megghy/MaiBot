@@ -398,14 +398,14 @@ class BaseReplyer:
             if is_group_chat:
                 if sender:
                     if has_only_pics and not has_text:
-                        reply_target_block = f"现在{sender}发送的图片：{pic_part}。引起了你的注意，你想要在群里发言或者回复这条消息。"
+                        reply_target_block = f"现在{sender}发送的图片引起了你的注意，你想要在群里发言或者回复这条消息：{pic_part}。"
                     elif has_text and pic_part:
                         reply_target_block = (
-                            f"现在{sender}发送了图片：{pic_part}，并说：{text_part}。引起了你的注意，你想要在群里发言或者回复这条消息。"
+                            f"现在{sender}发送了图片和消息引起了你的注意，你想要在群里发言或者回复这条消息：{pic_part}，并说：{text_part}。"
                         )
                     else:
                         reply_target_block = (
-                            f"现在{sender}说的:{text_part or target}。引起了你的注意，你想要在群里发言或者回复这条消息。"
+                            f"现在{sender}说的引起了你的注意，你想要在群里发言或者回复这条消息:{text_part or target}。"
                         )
                 elif target:
                     reply_target_block = f"现在{target}引起了你的注意，你想要在群里发言或者回复这条消息。"
@@ -414,13 +414,13 @@ class BaseReplyer:
             else:
                 display_sender = sender or "对方"
                 if has_only_pics and not has_text:
-                    reply_target_block = f"现在{display_sender}发送的图片：{pic_part}。引起了你的注意，针对这条消息回复。"
+                    reply_target_block = f"现在{display_sender}发送的图片引起了你的注意，针对这条消息回复：{pic_part}。"
                 elif has_text and pic_part:
                     reply_target_block = (
-                        f"现在{display_sender}发送了图片：{pic_part}，并说：{text_part}。引起了你的注意，针对这条消息回复。"
+                        f"现在{display_sender}发送了图片和消息引起了你的注意，针对这条消息回复：{pic_part}，并说：{text_part}。"
                     )
                 elif has_text:
-                    reply_target_block = f"现在{display_sender}说的:{text_part}。引起了你的注意，针对这条消息回复。"
+                    reply_target_block = f"现在{display_sender}说的引起了你的注意，针对这条消息回复：{text_part}。"
                 elif target:
                     reply_target_block = f"现在{target}引起了你的注意，针对这条消息回复。"
                 else:

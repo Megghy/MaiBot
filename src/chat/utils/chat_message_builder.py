@@ -800,6 +800,8 @@ def build_readable_messages(
         # 合并两部分动作记录
         actions: List[ActionRecords] = list(actions_in_range) + list(action_after_latest)
 
+        inserted_count = 0
+
         # 将动作记录转换为消息格式
         for action in actions:
             # 只有当build_into_prompt为True时才添加动作记录
@@ -817,6 +819,12 @@ def build_readable_messages(
                     action_name=str(action.action_name),  # 保存动作名称
                 )
                 copy_messages.append(action_msg)
+                inserted_count += 1
+
+        if inserted_count > 0:
+            logger.info(
+                f"chat_message_builder: 在聊天 {chat_id} 的上下文中插入了 {inserted_count} 条动作记录 (time_range={min_time:.0f}-{max_time:.0f})"
+            )
 
         # 重新按时间排序
         copy_messages.sort(key=lambda x: x.time or 0)

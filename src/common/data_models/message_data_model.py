@@ -71,6 +71,7 @@ class ForwardNode(BaseDataModel):
 class ReplyContent(BaseDataModel):
     content_type: ReplyContentType | str
     content: Union[str, Dict, List[ForwardNode], List["ReplyContent"]]  # 支持嵌套的 ReplyContent
+    delay: float = 0.0
 
     @classmethod
     def construct_as_text(cls, text: str):
@@ -136,13 +137,14 @@ class ReplySetModel(BaseDataModel):
     def __len__(self):
         return len(self.reply_data)
 
-    def add_text_content(self, text: str):
+    def add_text_content(self, text: str, delay: float = 0.0):
         """
         添加文本内容
         Args:
             text: 文本内容
+            delay: 发送延迟
         """
-        self.reply_data.append(ReplyContent(content_type=ReplyContentType.TEXT, content=text))
+        self.reply_data.append(ReplyContent(content_type=ReplyContentType.TEXT, content=text, delay=delay))
 
     def add_image_content(self, image_base64: str):
         """

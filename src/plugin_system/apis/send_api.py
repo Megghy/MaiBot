@@ -21,6 +21,7 @@
 
 import traceback
 import time
+import asyncio
 from typing import Optional, Union, Dict, List, TYPE_CHECKING, Tuple
 
 from src.common.logger import get_logger
@@ -375,6 +376,9 @@ async def custom_reply_set_to_stream(
     """
     flag: bool = True
     for reply_content in reply_set.reply_data:
+        if reply_content.delay > 0:
+            await asyncio.sleep(reply_content.delay)
+
         status: bool = False
         message_seg, need_typing = _parse_content_to_seg(reply_content)
         status = await _send_to_target(

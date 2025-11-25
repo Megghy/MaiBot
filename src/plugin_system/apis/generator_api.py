@@ -246,8 +246,8 @@ def process_human_text(content: str, enable_splitter: bool, enable_chinese_typo:
         reply_set = ReplySetModel()
         processed_response = process_llm_response(content, enable_splitter, enable_chinese_typo)
 
-        for text in processed_response:
-            reply_set.add_text_content(text)
+        for text, delay in processed_response:
+            reply_set.add_text_content(text, delay=delay)
 
         return reply_set
 

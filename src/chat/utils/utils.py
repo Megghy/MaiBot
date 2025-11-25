@@ -222,14 +222,14 @@ def split_into_sentences_w_remove_punctuation(text: str) -> list[str]:
     text = re.sub(r"([，,。;\s])\s*\n", r"\1", text)
 
     # 处理两个汉字中间的换行符
-    text = re.sub(r"([\u4e00-\u9fff])\n([\u4e00-\u9fff])", r"\1。\2", text)
+    # text = re.sub(r"([\u4e00-\u9fff])\n([\u4e00-\u9fff])", r"\1。\2", text)
 
     len_text = len(text)
     if len_text < 3:
         return list(text) if random.random() < 0.01 else [text]
 
     # 定义分隔符
-    separators = {"，", ",", " ", "。", ";"}
+    separators = {"，", ",", " ", "。", ";", "\n"}
     segments = []
     current_segment = ""
 
@@ -293,7 +293,8 @@ def split_into_sentences_w_remove_punctuation(text: str) -> list[str]:
 
         # 检查是否可以与下一段合并
         # 条件：不是最后一段，且随机数小于合并概率，且当前段有内容（避免合并空段）
-        if idx + 1 < len(segments) and random.random() < merge_probability and current_content:
+        # 且当前分隔符不是换行符（强制切分）
+        if idx + 1 < len(segments) and random.random() < merge_probability and current_content and current_sep != "\n":
             next_content, next_sep = segments[idx + 1]
             # 合并: (内容1 + 分隔符1 + 内容2, 分隔符2)
             # 只有当下一段也有内容时才合并文本，否则只传递分隔符
@@ -362,9 +363,9 @@ def _get_random_default_reply() -> str:
     return random.choice(default_replies)
 
 
-def process_llm_response(text: str, enable_splitter: bool = True, enable_chinese_typo: bool = True) -> list[str]:
+def process_llm_response(text: str, enable_splitter: bool = True, enable_chinese_typo: bool = True) -> list[tuple[str, float]]:
     if not global_config.response_post_process.enable_response_post_process:
-        return [text]
+        return [(text, 0.0)]
 
     # 先保护颜文字
     if global_config.response_splitter.enable_kaomoji_protection:
@@ -380,7 +381,7 @@ def process_llm_response(text: str, enable_splitter: bool = True, enable_chinese
     cleaned_text = pattern.sub("", protected_text)
 
     if cleaned_text == "":
-        return ["呃呃"]
+        return [("呃呃", 0.0)]
 
     logger.debug(f"{text}去除括号处理后的文本: {cleaned_text}")
 
@@ -390,7 +391,7 @@ def process_llm_response(text: str, enable_splitter: bool = True, enable_chinese
     # 如果基本上是中文，则进行长度过滤
     if get_western_ratio(cleaned_text) < 0.1 and len(cleaned_text) > max_length:
         logger.warning(f"回复过长 ({len(cleaned_text)} 字符)，返回默认回复")
-        return [_get_random_default_reply()]
+        return [(_get_random_default_reply(), 0.0)]
 
     typo_generator = ChineseTypoGenerator(
         error_rate=global_config.chinese_typo.error_rate,
@@ -427,7 +428,7 @@ def process_llm_response(text: str, enable_splitter: bool = True, enable_chinese
             sentences = [cleaned_text]
         else:
             logger.warning(f"分割后消息数量过多 ({len(sentences)} 条)，返回默认回复")
-            return [_get_random_default_reply()]
+            return [(_get_random_default_reply(), 0.0)]
 
     # if extracted_contents:
     #     for content in extracted_contents:
@@ -437,7 +438,16 @@ def process_llm_response(text: str, enable_splitter: bool = True, enable_chinese
     if global_config.response_splitter.enable_kaomoji_protection:
         sentences = recover_kaomoji(sentences, kaomoji_mapping)
 
-    return sentences
+    # 构建返回结果，包含延迟
+    results = []
+    for i, sent in enumerate(sentences):
+        delay = 0.0
+        if i > 0:
+            # 随机1-3秒延迟
+            delay = random.uniform(1, 3)
+        results.append((sent, delay))
+
+    return results
 
 
 def calculate_typing_time(

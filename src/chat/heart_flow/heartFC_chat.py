@@ -312,7 +312,7 @@ class HeartFChatting:
 
         await database_api.store_action_info(
             chat_stream=self.chat_stream,
-            action_build_into_prompt=False,
+            action_build_into_prompt=True,
             action_prompt_display=action_prompt_display,
             action_done=True,
             thinking_id=thinking_id,
@@ -760,7 +760,7 @@ class HeartFChatting:
 
                     await database_api.store_action_info(
                         chat_stream=self.chat_stream,
-                        action_build_into_prompt=False,
+                        action_build_into_prompt=True,
                         action_prompt_display=reason,
                         action_done=True,
                         thinking_id=thinking_id,
@@ -781,7 +781,7 @@ class HeartFChatting:
                     self.no_reply_until_call = True
                     await database_api.store_action_info(
                         chat_stream=self.chat_stream,
-                        action_build_into_prompt=False,
+                        action_build_into_prompt=True,
                         action_prompt_display=reason,
                         action_done=True,
                         thinking_id=thinking_id,

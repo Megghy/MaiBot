@@ -44,29 +44,6 @@ def _build_focus_summary(chat_history: str, target_message: str, keywords: List[
     return "\n".join(summary_lines) if summary_lines else "无可用摘要"
 
 
-def _build_fallback_question(sender: str, target_message: str) -> Optional[str]:
-    core = target_message.strip() if target_message else "这条消息"
-    core = _truncate_text(core, 24) or "这条消息"
-    sender = sender or "对方"
-    return f"{sender} 提到的“{core}”指的具体事件或背景是什么？"
-
-
-QUESTION_HINT_REGEX = re.compile(r"[？?]|谁|什么|啥|哪|哪里|哪儿|什么时候|何时|为何|为什么|咋|怎么|如何|多少|第几")
-
-
-def _should_use_fallback_question(target_message: str, *, has_recent_query_history: bool, min_length: int = 6) -> bool:
-    """基于启发式判断是否需要触发fallback问题"""
-
-    if has_recent_query_history:
-        return False
-
-    text = (target_message or "").strip()
-    if len(text) < min_length:
-        return False
-
-    return bool(QUESTION_HINT_REGEX.search(text))
-
-
 async def _record_question_generation_trace(
     chat_stream,
     question_prompt: str,
@@ -1444,7 +1421,6 @@ async def build_memory_retrieval_prompt(
         recent_query_history_raw = await asyncio.to_thread(
             _get_recent_query_history, chat_id, time_window_seconds=300.0
         )
-        has_recent_query_history = bool(recent_query_history_raw)
         recent_query_history = recent_query_history_raw or "最近没有查询记录。"
 
         participant_hints = await asyncio.to_thread(_build_participant_hints, chat_id)
@@ -1501,21 +1477,7 @@ async def build_memory_retrieval_prompt(
         cached_memories = await asyncio.to_thread(_get_cached_memories, chat_id, time_window_seconds=300.0)
 
         if not questions:
-            fallback_reason = None
-            if _should_use_fallback_question(target, has_recent_query_history=has_recent_query_history):
-                fallback_reason = "heuristic"
-            elif concepts and not concept_info_found:
-                fallback_reason = "concepts_without_results"
-
-            if fallback_reason:
-                fallback = _build_fallback_question(sender, target)
-                if fallback:
-                    logger.info(
-                        f"问题列表为空，因 {fallback_reason} 触发自动回退问题: {fallback}"
-                    )
-                    questions = [fallback]
-            if not questions:
-                logger.info("问题列表为空，且启发式判断无需触发回退问题")
+            logger.info("问题列表为空，跳过记忆检索")
 
         # 控制单轮问题数量上限，避免问题拆分过多
         if questions and len(questions) > MAX_QUESTIONS_PER_TURN:
