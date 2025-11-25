@@ -70,6 +70,25 @@ def is_mentioned_bot_in_message(message: MessageRecv) -> tuple[bool, bool, float
     text = message.processed_plain_text or ""
     platform = getattr(message.message_info, "platform", "") or ""
 
+    # 为 @ 检测准备的文本：去掉回复头部，避免在引用旧消息时重复计数其中的 @
+    text_for_at_detection = text
+    try:
+        # 形如：[回复 昵称(123456)：原文内容]，说： 实际内容
+        text_for_at_detection = re.sub(
+            r"\[回复 (.+?)\(((\d+)|未知id|你)\)：(.+?)\]，说：",
+            "",
+            text_for_at_detection,
+        )
+        # 形如：[回复<昵称:123456>：原文内容]，说： 实际内容
+        text_for_at_detection = re.sub(
+            r"\[回复<(.+?)(?=:(\d+))\:(\d+)>：(.+?)\]，说：",
+            "",
+            text_for_at_detection,
+        )
+    except Exception:
+        # 正常情况下不会出错，如有异常则回退到原始文本
+        text_for_at_detection = text
+
     # 获取各平台账号
     platforms_list = getattr(global_config.bot, "platforms", []) or []
     platform_accounts = parse_platform_accounts(platforms_list)
@@ -125,12 +144,12 @@ def is_mentioned_bot_in_message(message: MessageRecv) -> tuple[bool, bool, float
     if current_account and not is_at and not is_mentioned:
         if platform == "qq":
             # QQ 格式: @<name:qq_id>
-            if re.search(rf"@<(.+?):{re.escape(current_account)}>", text):
+            if re.search(rf"@<(.+?):{re.escape(current_account)}>", text_for_at_detection):
                 is_at = True
                 is_mentioned = True
         else:
             # 其他平台格式: @username 或 @account
-            if re.search(rf"@{re.escape(current_account)}(\b|$)", text, flags=re.IGNORECASE):
+            if re.search(rf"@{re.escape(current_account)}(\b|$)", text_for_at_detection, flags=re.IGNORECASE):
                 is_at = True
                 is_mentioned = True
 

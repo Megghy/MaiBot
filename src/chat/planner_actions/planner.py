@@ -47,9 +47,6 @@ def init_prompt():
 **Chat Content**
 {chat_content_block}
 
-**Action Records**
-{actions_before_now_block}
-
 请选择一个合适的 action.
 """
 
@@ -518,8 +515,6 @@ class ActionPlanner:
     ) -> tuple[str, str, List[Tuple[str, "DatabaseMessages"]]]:
         """构建 Planner LLM 的提示词 (获取模板并填充数据)"""
         try:
-            actions_before_now_block = self.get_plan_log_str()
-
             # 构建聊天上下文描述
             chat_context_description = "你现在正在一个群聊中"
 
@@ -554,7 +549,6 @@ class ActionPlanner:
                 time_block=time_block,
                 chat_context_description=chat_context_description,
                 chat_content_block=chat_content_block,
-                actions_before_now_block=actions_before_now_block,
             )
 
             return prompt, system_prompt, message_id_list

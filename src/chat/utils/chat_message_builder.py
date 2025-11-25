@@ -491,7 +491,13 @@ def _build_readable_messages_internal(
     # 3: 格式化为字符串
     output_lines: List[str] = []
 
+    # 为首次出现的图片占位符内联描述
+    pic_descriptions = _get_pic_descriptions(pic_id_mapping) if pic_id_mapping else {}
+    seen_images: set = set()
+
     for timestamp, name, content, is_action in detailed_message:
+        if pic_descriptions:
+            content, seen_images = _inline_first_image_descriptions(content, pic_descriptions, seen_images)
         readable_time = translate_timestamp_to_human_readable(timestamp, mode=timestamp_mode)
 
         # 查找消息id（如果有）并构建id_prefix
@@ -516,27 +522,16 @@ def _build_readable_messages_internal(
     )
 
 
-def build_pic_mapping_info(pic_id_mapping: Dict[str, str]) -> str:
-    # sourcery skip: use-contextlib-suppress
-    """
-    构建图片映射信息字符串，显示图片的具体描述内容
-
-    Args:
-        pic_id_mapping: 图片ID到显示名称的映射字典
-
-    Returns:
-        格式化的映射信息字符串
-    """
+def _get_pic_descriptions(pic_id_mapping: Dict[str, str]) -> Dict[str, str]:
+    """根据图片ID映射获取每个图片显示名称到描述的映射"""
+    pic_descriptions: Dict[str, str] = {}
     if not pic_id_mapping:
-        return ""
+        return pic_descriptions
 
-    mapping_lines = []
-
-    # 按图片编号排序
+    # 按图片编号排序，确保描述顺序稳定
     sorted_items = sorted(pic_id_mapping.items(), key=lambda x: int(x[1].replace("图片", "")))
 
     for pic_id, display_name in sorted_items:
-        # 从数据库中获取图片描述
         description = "内容正在阅读，请稍等"
         try:
             image = Images.get_or_none(Images.image_id == pic_id)
@@ -546,6 +541,72 @@ def build_pic_mapping_info(pic_id_mapping: Dict[str, str]) -> str:
             # 如果查询失败，保持默认描述
             pass
 
+        pic_descriptions[display_name] = description
+
+    return pic_descriptions
+
+
+def _inline_first_image_descriptions(
+    text: str,
+    pic_descriptions: Dict[str, str],
+    seen_images: Optional[set] = None,
+) -> Tuple[str, set]:
+    """在文本中为每个图片显示名称的首次出现内联描述"""
+    if not text or not pic_descriptions:
+        return text, seen_images or set()
+
+    if seen_images is None:
+        seen_images = set()
+
+    # 按图片编号排序，确保替换顺序稳定
+    sorted_items = sorted(pic_descriptions.items(), key=lambda x: int(x[0].replace("图片", "")))
+
+    for display_name, description in sorted_items:
+        if display_name in seen_images:
+            continue
+
+        pattern = r"\[" + re.escape(display_name) + r"\]"
+
+        def _repl(_match: re.Match) -> str:  # type: ignore[override]
+            return f"[{display_name}: {description}]"
+
+        # 只替换第一次出现
+        new_text, count = re.subn(pattern, _repl, text, count=1)
+        if count > 0:
+            text = new_text
+            seen_images.add(display_name)
+
+    return text, seen_images
+
+
+def build_pic_mapping_info(pic_id_mapping: Dict[str, str], pic_descriptions: Optional[Dict[str, str]] = None) -> str:
+    # sourcery skip: use-contextlib-suppress
+    """
+    构建图片映射信息字符串，显示图片的具体描述内容
+
+    Args:
+        pic_id_mapping: 图片ID到显示名称的映射字典
+        pic_descriptions: 可选的图片显示名称到描述的映射，如果未提供则内部构建
+
+    Returns:
+        格式化的映射信息字符串
+    """
+    if not pic_id_mapping:
+        return ""
+
+    if pic_descriptions is None:
+        pic_descriptions = _get_pic_descriptions(pic_id_mapping)
+
+    if not pic_descriptions:
+        return ""
+
+    mapping_lines = []
+
+    # 按图片编号排序
+    sorted_display_names = sorted(pic_descriptions.keys(), key=lambda name: int(name.replace("图片", "")))
+
+    for display_name in sorted_display_names:
+        description = pic_descriptions.get(display_name, "内容正在阅读，请稍等")
         mapping_lines.append(f"[{display_name}] 的内容：{description}")
 
     return "\n".join(mapping_lines)
