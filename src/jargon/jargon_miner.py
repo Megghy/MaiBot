@@ -18,6 +18,7 @@ from src.chat.utils.chat_message_builder import (
     build_readable_messages_with_list,
 )
 from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
+from src.common.vector_store.manager import vector_manager
 
 
 logger = get_logger("jargon")
@@ -452,6 +453,19 @@ class JargonMiner:
                 jargon_obj.is_complete = True
 
             jargon_obj.save()
+
+            # Add to vector store if meaning is available
+            if jargon_obj.meaning:
+                asyncio.create_task(vector_manager.add_jargon(
+                    jargon_obj.content, 
+                    {
+                        "meaning": jargon_obj.meaning, 
+                        "chat_id": jargon_obj.chat_id,
+                        "is_global": jargon_obj.is_global,
+                        "jargon_id": jargon_obj.id
+                    }
+                ))
+
             logger.debug(
                 f"jargon {content} 推断完成: is_jargon={is_jargon}, meaning={jargon_obj.meaning}, last_inference_count={jargon_obj.last_inference_count}, is_complete={jargon_obj.is_complete}"
             )

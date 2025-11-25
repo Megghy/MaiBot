@@ -573,6 +573,8 @@ Action: 调用 `found_answer(answer="昨天张三提到了GitHub", source="memor
 
 async def _retrieve_concepts_with_jargon(concepts: List[str], chat_id: str) -> str:
     """对概念列表进行jargon检索
+    
+    优先使用向量语义搜索，若无结果则fallback到数据库字符串搜索
 
     Args:
         concepts: 概念列表
@@ -585,6 +587,7 @@ async def _retrieve_concepts_with_jargon(concepts: List[str], chat_id: str) -> s
         return ""
 
     from src.jargon.jargon_miner import search_jargon
+    from src.common.vector_store.manager import vector_manager
 
     results = []
     for concept in concepts:
@@ -592,24 +595,55 @@ async def _retrieve_concepts_with_jargon(concepts: List[str], chat_id: str) -> s
         if not concept:
             continue
 
-        # 先尝试精确匹配
-        jargon_results = await asyncio.to_thread(
-            search_jargon, keyword=concept, chat_id=chat_id, limit=10, case_sensitive=False, fuzzy=False
-        )
+        search_method = None
+        jargon_results = []
 
-        is_fuzzy_match = False
+        # 1. 优先使用向量语义搜索
+        try:
+            vector_results = await vector_manager.search_jargon(concept, k=3)
+            if vector_results:
+                # 过滤相似度过低的结果 (similarity < 0.5)
+                jargon_results = [
+                    {"content": r.get("text", ""), "meaning": r.get("meaning", "")}
+                    for r in vector_results
+                    if r.get("similarity", 0) >= 0.5 and r.get("meaning")
+                ]
+                if jargon_results:
+                    search_method = "vector"
+                    logger.info(f"向量搜索找到 {len(jargon_results)} 条jargon结果: {concept}")
+        except Exception as e:
+            logger.warning(f"向量搜索jargon失败: {e}")
 
-        # 如果精确匹配未找到，尝试模糊搜索
+        # 2. 向量搜索无结果时，fallback到数据库精确匹配
         if not jargon_results:
             jargon_results = await asyncio.to_thread(
-                search_jargon, keyword=concept, chat_id=chat_id, limit=10, case_sensitive=False, fuzzy=True
+                search_jargon, keyword=concept, chat_id=chat_id, limit=5, case_sensitive=False, fuzzy=False
             )
-            is_fuzzy_match = True
+            if jargon_results:
+                search_method = "exact"
+                logger.info(f"数据库精确匹配找到 {len(jargon_results)} 条jargon结果: {concept}")
 
+        # 3. 精确匹配无结果时，尝试模糊搜索
+        if not jargon_results:
+            jargon_results = await asyncio.to_thread(
+                search_jargon, keyword=concept, chat_id=chat_id, limit=5, case_sensitive=False, fuzzy=True
+            )
+            if jargon_results:
+                search_method = "fuzzy"
+                logger.info(f"数据库模糊搜索找到 {len(jargon_results)} 条jargon结果: {concept}")
+
+        # 格式化结果
         if jargon_results:
-            # 找到结果
-            if is_fuzzy_match:
-                # 模糊匹配
+            if search_method == "vector":
+                output_parts = []
+                for result in jargon_results:
+                    content = result.get("content", "").strip()
+                    meaning = result.get("meaning", "").strip()
+                    if content and meaning:
+                        output_parts.append(f"'{content}' 的含义为：{meaning}")
+                if output_parts:
+                    results.append("；".join(output_parts))
+            elif search_method == "fuzzy":
                 output_parts = [f"未精确匹配到'{concept}'"]
                 for result in jargon_results:
                     found_content = result.get("content", "").strip()
@@ -617,18 +651,15 @@ async def _retrieve_concepts_with_jargon(concepts: List[str], chat_id: str) -> s
                     if found_content and meaning:
                         output_parts.append(f"找到 '{found_content}' 的含义为：{meaning}")
                 results.append("，".join(output_parts))
-                logger.info(f"在jargon库中找到匹配（模糊搜索）: {concept}，找到{len(jargon_results)}条结果")
-            else:
-                # 精确匹配
+            else:  # exact
                 output_parts = []
                 for result in jargon_results:
                     meaning = result.get("meaning", "").strip()
                     if meaning:
                         output_parts.append(f"'{concept}' 为黑话或者网络简写，含义为：{meaning}")
-                results.append("；".join(output_parts) if len(output_parts) > 1 else output_parts[0])
-                logger.info(f"在jargon库中找到匹配（精确匹配）: {concept}，找到{len(jargon_results)}条结果")
+                if output_parts:
+                    results.append("；".join(output_parts) if len(output_parts) > 1 else output_parts[0])
         else:
-            # 未找到，不返回占位信息，只记录日志
             logger.info(f"在jargon库中未找到匹配: {concept}")
 
     if results:

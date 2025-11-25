@@ -159,10 +159,23 @@ class BrainPlanner:
             )
             params.append(("reason", ToolParamType.STRING, "使用此动作的原因", True, None))
 
-            tools.append(
-                {"name": action_name, "description": action_info.description, "parameters": params}
-            )
+            # Construct rich description
+            description = action_info.description or "No description"
 
+            requirements = []
+            if action_info.action_require:
+                requirements.extend(action_info.action_require)
+
+            if not action_info.parallel_action:
+                requirements.append("当选择这个动作时，请不要选择其他动作 (Exclusive Action)")
+
+            if requirements:
+                description += "\n使用条件/要求:\n" + "\n".join([f"- {req}" for req in requirements])
+
+            tools.append(
+                {"name": action_name, "description": description, "parameters": params}
+            )
+            
         return tools
 
     def _parse_single_tool_call(
@@ -329,9 +342,6 @@ class BrainPlanner:
                     f"你正在和 {chat_target_info.person_name or chat_target_info.user_nickname or '对方'} 聊天中"
                 )
 
-            # 构建动作选项块
-            action_options_block = await self._build_action_options_block(current_available_actions)
-
             # 其他信息
             moderation_prompt_block = "请不要输出违法违规内容，不要输出色情，暴力，政治相关内容，如有敏感内容，请规避。"
             time_block = f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
@@ -348,7 +358,6 @@ class BrainPlanner:
                 chat_context_description=chat_context_description,
                 chat_content_block=chat_content_block,
                 actions_before_now_block=actions_before_now_block,
-                action_options_text=action_options_block,
                 moderation_prompt=moderation_prompt_block,
                 name_block=name_block,
                 interest=interest,
@@ -410,40 +419,6 @@ class BrainPlanner:
 
         return filtered_actions
 
-    async def _build_action_options_block(self, current_available_actions: Dict[str, ActionInfo]) -> str:
-        # sourcery skip: use-join
-        """构建动作选项块"""
-        if not current_available_actions:
-            return ""
-
-        action_options_block = ""
-        for action_name, action_info in current_available_actions.items():
-            # 构建参数文本
-            param_text = ""
-            if action_info.action_parameters:
-                param_text = "\n"
-                for param_name, param_description in action_info.action_parameters.items():
-                    param_text += f'    "{param_name}":"{param_description}"\n'
-                param_text = param_text.rstrip("\n")
-
-            # 构建要求文本
-            require_text = ""
-            for require_item in action_info.action_require:
-                require_text += f"- {require_item}\n"
-            require_text = require_text.rstrip("\n")
-
-            # 获取动作提示模板并填充
-            using_action_prompt = await global_prompt_manager.get_prompt_async("brain_action_prompt")
-            using_action_prompt = using_action_prompt.format(
-                action_name=action_name,
-                action_description=action_info.description,
-                action_parameters=param_text,
-                action_require=require_text,
-            )
-
-            action_options_block += using_action_prompt
-
-        return action_options_block
 
     async def _execute_main_planner(
         self,

@@ -117,6 +117,7 @@ class LLMRequest:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
+        system_prompt: Optional[str] = None,
         raise_when_empty: bool = True,
     ) -> Tuple[str, Tuple[str, str, Optional[List[ToolCall]]]]:
         """
@@ -126,6 +127,7 @@ class LLMRequest:
             temperature (float, optional): 温度参数
             max_tokens (int, optional): 最大token数
             tools (Optional[List[Dict[str, Any]]]): 工具列表
+            system_prompt (Optional[str]): 系统提示词
             raise_when_empty (bool): 当响应为空时是否抛出异常
         Returns:
             (Tuple[str, str, str, Optional[List[ToolCall]]]): 响应内容、推理内容、模型名称、工具调用列表
@@ -134,6 +136,8 @@ class LLMRequest:
 
         def message_factory(client: BaseClient) -> List[Message]:
             message_builder = MessageBuilder()
+            if system_prompt:
+                message_builder.add_system_content(system_prompt)
             message_builder.add_text_content(prompt)
             return [message_builder.build()]
 

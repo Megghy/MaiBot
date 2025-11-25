@@ -33,10 +33,16 @@ install(extra_lines=3)
 
 def init_prompt():
     Prompt(
-        """
-{time_block}
-{name_block}
+        """{name_block}
 你的兴趣是: {interest}
+**Action Selection Requirements**
+{plan_style}
+{moderation_prompt}""",
+        "planner_system_prompt",
+    )
+
+    SHARED_USER_PROMPT = """
+{time_block}
 {chat_context_description}, 以下是具体的聊天内容
 **Chat Content**
 {chat_content_block}
@@ -45,50 +51,33 @@ def init_prompt():
 {actions_before_now_block}
 
 请选择一个合适的 action.
+"""
+
+    Prompt(
+        SHARED_USER_PROMPT + """
 **Critial Instruction**: 
 在调用工具前, 你必须先在心中回答: **"最新这条消息是发给谁的?"** (参考 Context 中的对话流向). 
 不要默认消息是发给你的, 只有当你确信需要回应时才行动.
 
-**Action Selection Requirements**
-{plan_style}
-{moderation_prompt}
+**Available Actions**:
+请参考 Tool Definitions 中的工具列表.
 
 请使用 Tool Calls 来执行 actions.
 """,
-        "planner_prompt",
+        "planner_user_prompt",
     )
 
     Prompt(
-        """{time_block}
-{name_block}
-{chat_context_description}, 以下是具体的聊天内容
-**聊天内容**
-{chat_content_block}
-
-**Action Records**
-{actions_before_now_block}
-
-请选择一个合适的 action.
+        SHARED_USER_PROMPT + """
 首先, 思考你的选择理由, 然后使用 tool calls 来执行 action.
 **Action Selection Requirements**
 请根据聊天内容, 用户的最新消息和以下标准选择合适的 action:
 1. 思考**所有**的可用的 action 中的**每个动作**是否符合当下条件, 如果动作使用条件符合聊天内容就使用
 2. 如果相同的内容已经被执行, 请不要重复执行
-{moderation_prompt}
 
 请使用 Tool Calls 来执行 actions. 你可以同时调用多个 tools.
 """,
-        "planner_prompt_mentioned",
-    )
-
-    Prompt(
-        """
-{action_name}
-动作描述: {action_description}
-使用条件 {parallel_text}:
-{action_require}
-""",
-        "action_prompt",
+        "planner_mentioned_user_prompt",
     )
 
 
@@ -105,6 +94,7 @@ class ActionPlanner:
         self.last_obs_time_mark = 0.0
 
         self.plan_log: List[Tuple[str, float, Union[List[ActionPlannerInfo], str]]] = []
+        self._allow_no_reply_until_call = False
 
     def find_message_by_id(
         self, message_id: str, message_id_list: List[Tuple[str, "DatabaseMessages"]]
@@ -164,7 +154,9 @@ class ActionPlanner:
 
         return re.sub(pattern, _replace, text)
 
-    def _convert_actions_to_tools(self, actions: Dict[str, ActionInfo]) -> List[Dict[str, Any]]:
+    def _convert_actions_to_tools(
+        self, actions: Dict[str, ActionInfo], include_no_reply_until_call: bool = False
+    ) -> List[Dict[str, Any]]:
         """Convert actions to tool definitions"""
         tools = []
         
@@ -198,14 +190,14 @@ class ActionPlanner:
             ]
         })
 
-        # no_reply_until_call
-        tools.append({
-            "name": "no_reply_until_call",
-            "description": "保持沉默直到被指名道姓地呼叫.",
-            "parameters": [
-                ("reason", ToolParamType.STRING, "进入此模式的原因, 用简短的语句说明", True, None)
-            ]
-        })
+        if include_no_reply_until_call:
+            tools.append({
+                "name": "no_reply_until_call",
+                "description": "保持沉默直到被指名道姓地呼叫.",
+                "parameters": [
+                    ("reason", ToolParamType.STRING, "进入此模式的原因, 用简短的语句说明", True, None)
+                ]
+            })
 
         for action_name, action_info in actions.items():
             if action_name in ["reply", "no_reply", "wait_time", "no_reply_until_call"]:
@@ -231,9 +223,22 @@ class ActionPlanner:
             params.append(("target_message_id", ToolParamType.STRING, "触发此动作的消息ID", False, None))
             params.append(("reason", ToolParamType.STRING, "使用此动作的原因", True, None))
 
+            # Construct rich description
+            description = action_info.description or "No description"
+
+            requirements = []
+            if action_info.action_require:
+                requirements.extend(action_info.action_require)
+
+            if not action_info.parallel_action:
+                requirements.append("当选择这个动作时，请不要选择其他动作 (Exclusive Action)")
+
+            if requirements:
+                description += "\n使用条件/要求:\n" + "\n".join([f"- {req}" for req in requirements])
+
             tools.append({
                 "name": action_name,
-                "description": action_info.description,
+                "description": description,
                 "parameters": params
             })
             
@@ -326,6 +331,8 @@ class ActionPlanner:
         规划器 (Planner): 使用LLM根据上下文决定做出什么动作。
         """
 
+        self._allow_no_reply_until_call = False
+
         # 获取聊天上下文
         message_list_before_now = get_raw_msg_before_timestamp_with_chat(
             chat_id=self.chat_id,
@@ -368,7 +375,7 @@ class ActionPlanner:
             return []
 
         # 构建包含所有动作的提示词
-        prompt, message_id_list = await self.build_planner_prompt(
+        prompt, system_prompt, message_id_list = await self.build_planner_prompt(
             is_group_chat=is_group_chat,
             chat_target_info=chat_target_info,
             current_available_actions=selected_actions,
@@ -385,6 +392,7 @@ class ActionPlanner:
             filtered_actions=selected_actions,
             available_actions=available_actions,
             loop_start_time=loop_start_time,
+            system_prompt=system_prompt,
         )
 
         if actions:
@@ -494,16 +502,13 @@ class ActionPlanner:
         chat_content_block: str = "",
         interest: str = "",
         is_mentioned: bool = False,
-    ) -> tuple[str, List[Tuple[str, "DatabaseMessages"]]]:
+    ) -> tuple[str, str, List[Tuple[str, "DatabaseMessages"]]]:
         """构建 Planner LLM 的提示词 (获取模板并填充数据)"""
         try:
             actions_before_now_block = self.get_plan_log_str()
 
             # 构建聊天上下文描述
             chat_context_description = "你现在正在一个群聊中"
-
-            # 构建动作选项块
-            action_options_block = await self._build_action_options_block(current_available_actions)
 
             # 其他信息
             moderation_prompt_block = "请不要输出违法违规内容，不要输出色情，暴力，政治相关内容，如有敏感内容，请规避。"
@@ -514,53 +519,36 @@ class ActionPlanner:
             )
             name_block = f"你的名字是{bot_name}{bot_nickname}，请注意哪些是你自己的发言。"
 
+            # 构建系统提示词
+            system_prompt = await global_prompt_manager.format_prompt(
+                "planner_system_prompt",
+                name_block=name_block,
+                interest=interest,
+                plan_style=global_config.personality.plan_style,
+                moderation_prompt=moderation_prompt_block,
+            )
+
             # 根据是否是提及时选择不同的模板
             if is_mentioned:
-                # 提及时使用简化版提示词，不需要reply、no_reply、no_reply_until_call
-                planner_prompt_template = await global_prompt_manager.get_prompt_async("planner_prompt_mentioned")
-                prompt = planner_prompt_template.format(
-                    time_block=time_block,
-                    chat_context_description=chat_context_description,
-                    chat_content_block=chat_content_block,
-                    actions_before_now_block=actions_before_now_block,
-                    action_options_text=action_options_block,
-                    moderation_prompt=moderation_prompt_block,
-                    name_block=name_block,
-                    interest=interest,
-                    plan_style=global_config.personality.plan_style,
-                )
+                self._allow_no_reply_until_call = False
+                prompt_name = "planner_mentioned_user_prompt"
             else:
-                # 正常流程使用完整版提示词
-                # 检查是否有连续3次以上no_reply，如果有则添加no_reply_until_call选项
-                no_reply_until_call_block = ""
-                if self._has_consecutive_no_reply(min_count=3):
-                    no_reply_until_call_block = """no_reply_until_call
-动作描述：
-保持沉默，直到有人直接叫你的名字
-当前话题不感兴趣时使用，或有人不喜欢你的发言时使用
-当你频繁选择no_reply时使用，表示话题暂时与你无关
-{{"action":"no_reply_until_call"}}
-"""
+                self._allow_no_reply_until_call = self._has_consecutive_no_reply(min_count=3)
+                prompt_name = "planner_user_prompt"
 
-                planner_prompt_template = await global_prompt_manager.get_prompt_async("planner_prompt")
-                prompt = planner_prompt_template.format(
-                    time_block=time_block,
-                    chat_context_description=chat_context_description,
-                    chat_content_block=chat_content_block,
-                    actions_before_now_block=actions_before_now_block,
-                    action_options_text=action_options_block,
-                    no_reply_until_call_block=no_reply_until_call_block,
-                    moderation_prompt=moderation_prompt_block,
-                    name_block=name_block,
-                    interest=interest,
-                    plan_style=global_config.personality.plan_style,
-                )
+            prompt = await global_prompt_manager.format_prompt(
+                prompt_name,
+                time_block=time_block,
+                chat_context_description=chat_context_description,
+                chat_content_block=chat_content_block,
+                actions_before_now_block=actions_before_now_block,
+            )
 
-            return prompt, message_id_list
+            return prompt, system_prompt, message_id_list
         except Exception as e:
             logger.error(f"构建 Planner 提示词时出错: {e}")
             logger.error(traceback.format_exc())
-            return "构建 Planner Prompt 时出错", []
+            return "构建 Planner Prompt 时出错", "", []
 
     def get_necessary_info(self) -> Tuple[bool, Optional["TargetPersonInfo"], Dict[str, ActionInfo]]:
         """
@@ -610,46 +598,6 @@ class ActionPlanner:
                 logger.warning(f"{self.log_prefix}未知的激活类型: {action_info.activation_type}，跳过处理")
 
         return filtered_actions
-
-    async def _build_action_options_block(self, current_available_actions: Dict[str, ActionInfo]) -> str:
-        """构建动作选项块"""
-        if not current_available_actions:
-            return ""
-
-        action_options_block = ""
-        for action_name, action_info in current_available_actions.items():
-            # 构建参数文本
-            param_text = ""
-            if action_info.action_parameters:
-                param_text = "\n"
-                for param_name, param_description in action_info.action_parameters.items():
-                    param_text += f'    "{param_name}":"{param_description}"\n'
-                param_text = param_text.rstrip("\n")
-
-            # 构建要求文本
-            require_text = ""
-            for require_item in action_info.action_require:
-                require_text += f"- {require_item}\n"
-            require_text = require_text.rstrip("\n")
-
-            if not action_info.parallel_action:
-                parallel_text = "(当选择这个动作时，请不要选择其他动作)"
-            else:
-                parallel_text = ""
-
-            # 获取动作提示模板并填充
-            using_action_prompt = await global_prompt_manager.get_prompt_async("action_prompt")
-            using_action_prompt = using_action_prompt.format(
-                action_name=action_name,
-                action_description=action_info.description,
-                action_parameters=param_text,
-                action_require=require_text,
-                parallel_text=parallel_text,
-            )
-
-            action_options_block += using_action_prompt
-
-        return action_options_block
 
     def _select_actions_for_prompt(
         self, available_actions: Dict[str, ActionInfo], chat_content_block: str
@@ -726,6 +674,7 @@ class ActionPlanner:
         filtered_actions: Dict[str, ActionInfo],
         available_actions: Dict[str, ActionInfo],
         loop_start_time: float,
+        system_prompt: Optional[str] = None,
     ) -> Tuple[str, List[ActionPlannerInfo]]:
         """执行主规划器"""
         llm_content = None
@@ -734,18 +683,23 @@ class ActionPlanner:
 
         try:
             # Build tools from filtered actions
-            tools = self._convert_actions_to_tools(filtered_actions)
+            tools = self._convert_actions_to_tools(
+                filtered_actions, include_no_reply_until_call=self._allow_no_reply_until_call
+            )
 
             # 调用LLM
             llm_content, (reasoning_content, _, tool_calls) = await self.planner_llm.generate_response_async(
                 prompt=prompt,
-                tools=tools
+                tools=tools,
+                system_prompt=system_prompt,
             )
             
             reasoning_text = reasoning_content or llm_content or ""
 
             if global_config.debug.show_planner_prompt:
                 logger.info(f"{self.log_prefix}规划器原始提示词: {prompt}")
+                if system_prompt:
+                    logger.info(f"{self.log_prefix}规划器系统提示词: {system_prompt}")
                 logger.info(f"{self.log_prefix}规划器原始响应: {llm_content}")
                 if reasoning_content:
                     logger.info(f"{self.log_prefix}规划器推理: {reasoning_content}")
@@ -753,6 +707,8 @@ class ActionPlanner:
                      logger.info(f"{self.log_prefix}规划器工具调用: {[t.func_name for t in tool_calls]}")
             else:
                 logger.debug(f"{self.log_prefix}规划器原始提示词: {prompt}")
+                if system_prompt:
+                    logger.debug(f"{self.log_prefix}规划器系统提示词: {system_prompt}")
                 logger.debug(f"{self.log_prefix}规划器原始响应: {llm_content}")
                 if reasoning_content:
                     logger.debug(f"{self.log_prefix}规划器推理: {reasoning_content}")
@@ -785,11 +741,21 @@ class ActionPlanner:
                  traceback.print_exc()
                  actions = self._create_no_reply(f"解析LLM工具调用失败: {json_e}", available_actions)
         else:
-            logger.warning(f"{self.log_prefix}LLM没有返回工具调用: {llm_content}")
-            reason = "规划器没有返回有效的动作选择"
-            if llm_content:
-                 reason = f"规划器未选择动作，回复内容: {llm_content[:50]}..."
-            actions = self._create_no_reply(reason, available_actions)
+            # 尝试从内容中解析可能的 JSON 工具调用（回退机制）
+            try:
+                fallback_actions = self._try_parse_json_fallback(
+                    llm_content, filtered_actions, message_id_list, reasoning_text
+                )
+                if fallback_actions:
+                    actions.extend(fallback_actions)
+                else:
+                    logger.warning(f"{self.log_prefix}LLM没有返回工具调用: {llm_content}")
+                    reason = f"规划器未选择动作，回复内容: {llm_content[:50]}..." if llm_content else "规划器没有返回有效的动作选择"
+                    actions = self._create_no_reply(reason, available_actions)
+            except Exception as e:
+                logger.warning(f"{self.log_prefix}尝试解析内容为 JSON 失败: {e}")
+                reason = f"规划器未选择动作，回复内容: {llm_content[:50]}..." if llm_content else "规划器没有返回有效的动作选择"
+                actions = self._create_no_reply(reason, available_actions)
 
         # 添加循环开始时间到所有非no_reply动作
         for action in actions:
@@ -811,6 +777,56 @@ class ActionPlanner:
                 available_actions=available_actions,
             )
         ]
+
+    def _try_parse_json_fallback(
+        self,
+        llm_content: str,
+        filtered_actions: Dict[str, ActionInfo],
+        message_id_list: List[Tuple[str, "DatabaseMessages"]],
+        reasoning_text: str,
+    ) -> Optional[List[ActionPlannerInfo]]:
+        """尝试从 LLM 输出中解析 JSON 格式的工具调用（回退机制）"""
+        import json
+        
+        content_to_parse = llm_content.strip()
+        # 移除 Markdown 代码块标记
+        for prefix in ("```json", "```"):
+            if content_to_parse.startswith(prefix):
+                content_to_parse = content_to_parse[len(prefix):]
+                break
+        if content_to_parse.endswith("```"):
+            content_to_parse = content_to_parse[:-3]
+        content_to_parse = content_to_parse.strip()
+
+        if not (content_to_parse.startswith("{") and content_to_parse.endswith("}")):
+            return None
+
+        logger.info(f"{self.log_prefix}检测到 JSON 格式的内容，尝试作为工具调用解析")
+        action_data = json.loads(content_to_parse)
+        
+        # 尝试推断 action_type
+        action_type = action_data.get("name") or action_data.get("action") or action_data.get("action_type")
+        
+        if not action_type:
+            # 尝试查找匹配的 action key
+            for key in filtered_actions:
+                if key in action_data:
+                    action_type = key
+                    break
+            # 默认回退逻辑
+            if not action_type:
+                if "target_message_id" in action_data:
+                    action_type = "reply"
+                elif "reason" in action_data and len(action_data) == 1:
+                    action_type = "no_reply"
+
+        if not action_type:
+            raise ValueError("无法从 JSON 中推断 action type")
+
+        fake_tool_call = ToolCall(func_name=action_type, args=action_data, id="fake_json_call")
+        return self._parse_single_tool_call(
+            fake_tool_call, message_id_list, list(filtered_actions.items()), reasoning_text
+        )
 
 
 init_prompt()

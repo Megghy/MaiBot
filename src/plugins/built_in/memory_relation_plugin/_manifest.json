@@ -1,0 +1,35 @@
+{
+  "manifest_version": 1,
+  "name": "记忆与关系插件 (Memory & Relation Actions)",
+  "version": "1.0.0",
+  "description": "提供 build_memory 与 build_relation 动作，用于记录人物记忆和关系。",
+  "author": {
+    "name": "MaiBot",
+    "url": "https://github.com/MaiM-with-u/mai-bot"
+  },
+  "license": "GPL-3.0-or-later",
+  "host_application": {
+    "min_version": "0.10.0"
+  },
+  "homepage_url": "https://github.com/MaiM-with-u/mai-bot",
+  "repository_url": "https://github.com/MaiM-with-u/mai-bot",
+  "keywords": ["memory", "relation", "action"],
+  "categories": ["Memory", "Relation"],
+  "default_locale": "zh-CN",
+  "plugin_info": {
+    "is_built_in": true,
+    "plugin_type": "action_provider",
+    "components": [
+      {
+        "type": "action",
+        "name": "build_memory",
+        "description": "记录当前对话中的重要记忆"
+      },
+      {
+        "type": "action",
+        "name": "build_relation",
+        "description": "分析并记录与对方的关系"
+      }
+    ]
+  }
+}

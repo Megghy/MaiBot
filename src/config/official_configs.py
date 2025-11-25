@@ -120,6 +120,16 @@ class ChatConfig(ConfigBase):
     include_planner_reasoning: bool = False
     """是否将planner推理加入replyer，默认关闭（不加入）"""
 
+    # 防抖配置
+    debounce_short_idle: float = 6.0
+    """激进模式下的静默等待时间(秒)，当最近有发言时使用较短等待"""
+
+    debounce_long_idle: float = 15.0
+    """休闲模式下的静默等待时间(秒)，当较长时间未发言时使用较长等待"""
+
+    debounce_recent_speak_window: float = 60.0
+    """判定"刚才聊过天"的时间窗口(秒)，在此时间内有发言则使用激进模式"""
+
     def _parse_stream_config_to_chat_id(self, stream_config_str: str) -> Optional[str]:
         """与 ChatStream.get_stream_id 一致地从 "platform:id:type" 生成 chat_id。"""
         try:

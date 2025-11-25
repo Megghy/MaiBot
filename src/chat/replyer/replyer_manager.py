@@ -2,6 +2,7 @@ from typing import Dict, Optional
 
 from src.common.logger import get_logger
 from src.chat.message_receive.chat_stream import ChatStream, get_chat_manager
+from src.chat.replyer.base_replyer import BaseReplyer
 from src.chat.replyer.group_generator import DefaultReplyer
 from src.chat.replyer.private_generator import PrivateReplyer
 
@@ -10,14 +11,14 @@ logger = get_logger("ReplyerManager")
 
 class ReplyerManager:
     def __init__(self):
-        self._repliers: Dict[str, DefaultReplyer | PrivateReplyer] = {}
+        self._repliers: Dict[str, BaseReplyer] = {}
 
     def get_replyer(
         self,
         chat_stream: Optional[ChatStream] = None,
         chat_id: Optional[str] = None,
         request_type: str = "replyer",
-    ) -> Optional[DefaultReplyer | PrivateReplyer]:
+    ) -> Optional[BaseReplyer]:
         """
         获取或创建回复器实例。
 

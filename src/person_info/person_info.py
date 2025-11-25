@@ -1,3 +1,4 @@
+import uuid
 import hashlib
 import asyncio
 import json
@@ -14,6 +15,7 @@ from src.common.database.database_model import PersonInfo, PersonGroupMemory
 from src.llm_models.utils_model import LLMRequest
 from src.config.config import global_config, model_config
 from src.chat.message_receive.chat_stream import get_chat_manager
+from src.common.vector_store.manager import vector_manager
 
 
 logger = get_logger("person_info")
@@ -36,6 +38,7 @@ MEMORY_HARD_FORGET_SECONDS = 180 * 24 * 60 * 60  # ~6 months
 
 
 class MemoryPointDict(TypedDict, total=False):
+    id: str
     category: str
     content: str
     weight: float
@@ -109,6 +112,8 @@ def _normalize_memory_dict(memory_point: Any) -> Optional[MemoryPointDict]:
             last_used_at=float(memory_point.get("last_used_at") or memory_point.get("created_at") or now),
             hits=int(memory_point.get("hits") or 1),
         )
+        if memory_point.get("id"):
+            normalized["id"] = str(memory_point.get("id"))
         source = memory_point.get("source")
         context = memory_point.get("context")
         if source:
@@ -499,6 +504,7 @@ class Person:
                 continue
             memory_category = memory_point.get("category")
             memory_text = memory_point.get("content") or ""
+            memory_id = memory_point.get("id")
 
             if memory_category != category:
                 memory_points_to_keep.append(memory_point)
@@ -507,6 +513,8 @@ class Person:
             similarity = calculate_string_similarity(memory_content, memory_text)
             if similarity >= similarity_threshold:
                 deleted_count += 1
+                if memory_id:
+                    asyncio.create_task(vector_manager.delete([memory_id]))
                 logger.debug(
                     f"删除记忆点: {_memory_to_log_string(memory_point)} (相似度: {similarity:.4f})"
                 )
@@ -593,6 +601,16 @@ class Person:
             if similarity >= MEMORY_SIMILARITY_THRESHOLD:
                 duplicate_point = point
                 break
+        
+        # 准备向量元数据
+        vector_metadata = {
+            "person_id": self.person_id,
+            "category": category,
+            "weight": weight_value,
+            "source": source,
+            "context": context,
+            "created_at": now,
+        }
 
         if duplicate_point is not None:
             old_weight = duplicate_point.get("weight", 1.0)
@@ -606,10 +624,20 @@ class Person:
                 duplicate_point["source"] = source
             if context:
                 duplicate_point["context"] = context
+            
+            # 更新向量（实际上是添加新的，因为内容可能微调）
+            # 如果有旧ID，也许应该删除？但这里简化处理，只添加新的
+            if category == "关系":
+                asyncio.create_task(vector_manager.add_relation(memory_content, vector_metadata))
+            else:
+                asyncio.create_task(vector_manager.add_memory(memory_content, vector_metadata))
+                
             logger.debug(f"更新已存在的记忆点: {_memory_to_log_string(duplicate_point)}")
         else:
             self._ensure_memory_capacity(category)
+            new_id = str(uuid.uuid4())
             new_point: MemoryPointDict = {
+                "id": new_id,
                 "category": category,
                 "content": memory_content,
                 "weight": weight_value,
@@ -623,6 +651,14 @@ class Person:
             if context:
                 new_point["context"] = context
             self.memory_points.append(new_point)
+            
+            # 添加到向量库
+            vector_metadata["id"] = new_id
+            if category == "关系":
+                asyncio.create_task(vector_manager.add_relation(memory_content, vector_metadata))
+            else:
+                asyncio.create_task(vector_manager.add_memory(memory_content, vector_metadata))
+                
             logger.debug(f"新增记忆点: {_memory_to_log_string(new_point)}")
 
         self.sync_to_database()
@@ -702,6 +738,64 @@ class Person:
 
         return [m[1] for m in scored_memories[:num]]
 
+    async def _get_relevant_memories_by_category_vector(self, category: str, query_text: str, num: int = 1):
+        """使用向量检索获取与查询内容最相关的记忆
+
+        Args:
+            category: 记忆分类
+            query_text: 查询文本（聊天内容或信息类型描述）
+            num: 需要的记忆条数
+
+        Returns:
+            List[MemoryPointDict]: 匹配到的记忆点列表
+        """
+        query_text = (query_text or "").strip()
+        if not query_text or not self.is_known:
+            # 无查询文本或用户未认识时，回退到本地随机/打分逻辑
+            return self.get_relevant_memories_by_category(category, query_text, num)
+
+        # 使用向量检索时只在当前用户且指定分类内搜索
+        def _filter(meta: dict[str, Any]) -> bool:
+            if meta.get("person_id") != self.person_id:
+                return False
+            if meta.get("category") != category:
+                return False
+            return True
+
+        try:
+            vector_results = await vector_manager.search_memory(query_text, k=max(num * 2, num + 1), filter_fn=_filter)
+        except Exception as e:
+            logger.warning(f"向量关系记忆检索失败, 使用回退逻辑: {e}")
+            return self.get_relevant_memories_by_category(category, query_text, num)
+
+        if not vector_results:
+            return self.get_relevant_memories_by_category(category, query_text, num)
+
+        # 依据相似度排序并取前 num 条
+        sorted_results = sorted(vector_results, key=lambda x: float(x.get("similarity", 0.0)), reverse=True)
+        top_results = sorted_results[:num]
+
+        # 将向量结果映射回现有 memory_points（通过 id 匹配），以保持后续处理逻辑一致
+        id_to_memory: dict[str, MemoryPointDict] = {}
+        for m in self.memory_points:
+            if not m:
+                continue
+            mid = str(m.get("id")) if m.get("id") is not None else None
+            if mid:
+                id_to_memory[mid] = m
+
+        matched_memories: List[MemoryPointDict] = []
+        for item in top_results:
+            vid = str(item.get("id")) if item.get("id") is not None else None
+            if vid and vid in id_to_memory:
+                matched_memories.append(id_to_memory[vid])
+
+        # 如果因为历史原因找不到对应内存结构，则回退到原逻辑
+        if not matched_memories:
+            return self.get_relevant_memories_by_category(category, query_text, num)
+
+        return matched_memories
+
     def get_group_memory_points(self, group_id: str) -> List[MemoryPointDict]:
         group_id = (group_id or "").strip()
         if not group_id:
@@ -738,6 +832,8 @@ class Person:
         category: Optional[str] = None,
         weight: float = 1.0,
         similarity_fn: Optional[Callable[[str, str], float]] = None,
+        source: Optional[str] = None,
+        context: Optional[str] = None,
     ) -> bool:
         if not self.is_known:
             logger.debug(f"用户 {self.person_id} 尚未被标记为已认识，无法添加群记忆")
@@ -767,6 +863,17 @@ class Person:
             if similarity >= MEMORY_SIMILARITY_THRESHOLD:
                 duplicate_point = point
                 break
+        
+        vector_metadata = {
+            "person_id": self.person_id,
+            "group_id": group_id,
+            "category": category,
+            "weight": weight_value,
+            "source": source,
+            "context": context,
+            "created_at": now,
+            "is_group": True,
+        }
 
         if duplicate_point is not None:
             old_weight = duplicate_point.get("weight", 1.0)
@@ -776,6 +883,16 @@ class Person:
             duplicate_point["updated_at"] = now
             duplicate_point["last_used_at"] = now
             duplicate_point["hits"] = int(duplicate_point.get("hits", 0)) + 1
+            if source:
+                duplicate_point["source"] = source
+            if context:
+                duplicate_point["context"] = context
+            
+            if category == "关系":
+                asyncio.create_task(vector_manager.add_relation(memory_content, vector_metadata))
+            else:
+                asyncio.create_task(vector_manager.add_memory(memory_content, vector_metadata))
+                
             logger.debug(f"更新已存在的群记忆点: {_memory_to_log_string(duplicate_point)}")
         else:
             category_points = [p for p in memory_points if get_category_from_memory(p) == category]
@@ -783,15 +900,21 @@ class Person:
                 removed_point = _remove_lowest_weight_entry(
                     memory_points, predicate=lambda p: get_category_from_memory(p) == category
                 )
+                if removed_point and removed_point.get("id"):
+                    asyncio.create_task(vector_manager.delete([removed_point["id"]]))
                 if removed_point:
                     logger.debug(f"移除群记忆点以腾出空间: {_memory_to_log_string(removed_point)}")
 
             if len(memory_points) >= MAX_MEMORY_POINTS:
                 removed_point = _remove_lowest_weight_entry(memory_points)
+                if removed_point and removed_point.get("id"):
+                    asyncio.create_task(vector_manager.delete([removed_point["id"]]))
                 if removed_point:
                     logger.debug(f"移除群记忆点以腾出空间: {_memory_to_log_string(removed_point)}")
 
+            new_id = str(uuid.uuid4())
             new_point: MemoryPointDict = {
+                "id": new_id,
                 "category": category,
                 "content": memory_content,
                 "weight": weight_value,
@@ -800,7 +923,18 @@ class Person:
                 "last_used_at": now,
                 "hits": 1,
             }
+            if source:
+                new_point["source"] = source
+            if context:
+                new_point["context"] = context
             memory_points.append(new_point)
+            
+            vector_metadata["id"] = new_id
+            if category == "关系":
+                asyncio.create_task(vector_manager.add_relation(memory_content, vector_metadata))
+            else:
+                asyncio.create_task(vector_manager.add_memory(memory_content, vector_metadata))
+
             logger.debug(f"新增群记忆点: {_memory_to_log_string(new_point)}")
 
         try:
@@ -969,7 +1103,7 @@ class Person:
             category_list = extract_categories_from_response(response)
             if "none" not in category_list:
                 for category in category_list:
-                    relevant_memory = self.get_relevant_memories_by_category(category, chat_content, 2)
+                    relevant_memory = await self._get_relevant_memories_by_category_vector(category, chat_content, 2)
                     if relevant_memory:
                         random_memory_str = "\n".join(
                             [get_memory_content_from_memory(memory) for memory in relevant_memory]
@@ -991,7 +1125,7 @@ class Person:
             category_list = extract_categories_from_response(response)
             if "none" not in category_list:
                 for category in category_list:
-                    relevant_memory = self.get_relevant_memories_by_category(category, info_type, 3)
+                    relevant_memory = await self._get_relevant_memories_by_category_vector(category, info_type, 3)
                     if relevant_memory:
                         random_memory_str = "\n".join(
                             [get_memory_content_from_memory(memory) for memory in relevant_memory]
@@ -1014,6 +1148,40 @@ class Person:
         relation_info = f"{self.person_name}:{nickname_str}{points_info}"
 
         return relation_info
+
+    async def record_relation(self, chat_context: str, source: str = None) -> str:
+        """
+        分析聊天上下文，生成关系摘要并记录
+        """
+        if not self.is_known:
+            return ""
+            
+        # 1. 获取上下文辅助信息
+        retrieval_context = await self.build_relationship(chat_content=chat_context)
+        
+        # 2. Generate summary using LLM
+        prompt = f"""根据以下聊天内容和已有记忆，总结你与用户 {self.person_name} 的关系变化或当前状态。
+        
+聊天内容:
+{chat_context}
+
+{retrieval_context}
+
+要求：
+1. 简明扼要，一句话概括。
+2. 侧重于态度、情感、承诺或重要事件。
+3. 如果没有值得记录的关系变化，输出 "无"。
+"""
+        response, _ = await relation_selection_model.generate_response_async(prompt)
+        summary = response.strip()
+        
+        if summary == "无" or not summary:
+            return ""
+            
+        # 3. Store
+        self.add_memory_point(summary, category="关系", source=source, context=chat_context[:100] if chat_context else None)
+        
+        return summary
 
 
 class PersonInfoManager:
