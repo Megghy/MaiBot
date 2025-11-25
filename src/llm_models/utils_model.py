@@ -266,26 +266,20 @@ class LLMRequest:
         """
         根据总tokens和惩罚值选择的模型
         """
-        available_models = {
-            model: scores
-            for model, scores in self.model_usage.items()
-            if not exclude_models or model not in exclude_models
-        }
-        if not available_models:
-            raise RuntimeError("没有可用的模型可供选择。所有模型均已尝试失败。")
+        for model_name in self.model_for_task.model_list:
+            if exclude_models and model_name in exclude_models:
+                continue
 
-        least_used_model_name = min(
-            available_models,
-            key=lambda k: available_models[k][0] + available_models[k][1] * 300 + available_models[k][2] * 1000,
-        )
-        model_info = model_config.get_model_info(least_used_model_name)
-        api_provider = model_config.get_provider(model_info.api_provider)
-        force_new_client = self.request_type == "embedding"
-        client = client_registry.get_client_class_instance(api_provider, force_new=force_new_client)
-        logger.debug(f"选择请求模型: {model_info.name}")
-        total_tokens, penalty, usage_penalty = self.model_usage[model_info.name]
-        self.model_usage[model_info.name] = (total_tokens, penalty, usage_penalty + 1)
-        return model_info, api_provider, client
+            model_info = model_config.get_model_info(model_name)
+            api_provider = model_config.get_provider(model_info.api_provider)
+            force_new_client = self.request_type == "embedding"
+            client = client_registry.get_client_class_instance(api_provider, force_new=force_new_client)
+            logger.debug(f"选择请求模型: {model_info.name}")
+            total_tokens, penalty, usage_penalty = self.model_usage[model_info.name]
+            self.model_usage[model_info.name] = (total_tokens, penalty, usage_penalty + 1)
+            return model_info, api_provider, client
+
+        raise RuntimeError("没有可用的模型可供选择。所有模型均已尝试失败。")
 
     async def _attempt_request_on_model(
         self,
