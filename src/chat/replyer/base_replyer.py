@@ -290,15 +290,28 @@ class BaseReplyer:
             # 检查是否拒绝回复
             if tool_calls:
                 for tool_call in tool_calls:
-                    if tool_call.function.name == "refuse_to_reply":
-                        args = tool_call.function.arguments
-                        reason = args if isinstance(args, str) else str(args)
-                        logger.info(f"模型决定拒绝回复，原因: {reason}")
-                        content = ""  # 清空内容表示不回复
-                        reasoning_content = f"{reasoning_content}\n[System] Refused to reply: {reason}"
-                        break
+                    # ToolCall 是自定义封装类，使用 func_name/args 字段
+                    tool_name = getattr(tool_call, "func_name", None)
+                    if tool_name != "refuse_to_reply":
+                        continue
 
-            content = content.strip()
+                    args = getattr(tool_call, "args", None)
+                    if isinstance(args, dict):
+                        reason = args.get("reason") or str(args)
+                    else:
+                        reason = str(args)
+
+                    logger.info(f"模型决定拒绝回复，原因: {reason}")
+                    # 清空内容表示不回复
+                    content = ""
+                    # 追加系统说明到推理内容，兼容 reasoning_content 可能為 None 的情況
+                    base_reasoning = (reasoning_content or "").rstrip()
+                    suffix = f"[System] Refused to reply: {reason}"
+                    reasoning_content = f"{base_reasoning}\n{suffix}" if base_reasoning else suffix
+                    break
+
+            # content 可能為 None（僅返回工具調用而無文本內容），統一轉為空字串再 strip
+            content = (content or "").strip()
 
             logger.info(f"使用 {model_name} 生成回复内容: {content}")
         return content, reasoning_content, model_name, tool_calls
