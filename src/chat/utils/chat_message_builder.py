@@ -801,6 +801,7 @@ def build_readable_messages(
         actions: List[ActionRecords] = list(actions_in_range) + list(action_after_latest)
 
         inserted_count = 0
+        inserted_actions: List[Tuple[str, float, str]] = []  # (action_name, time, prompt_display)
 
         # 将动作记录转换为消息格式
         for action in actions:
@@ -820,10 +821,18 @@ def build_readable_messages(
                 )
                 copy_messages.append(action_msg)
                 inserted_count += 1
+                inserted_actions.append(
+                    (str(action.action_name), float(action.time or 0), str(action.action_prompt_display or ""))
+                )
 
         if inserted_count > 0:
+            # 只打印简要信息，避免日志过长
+            preview = "; ".join(
+                f"{name}@{t:.0f}:{(prompt[:40] + '...') if len(prompt) > 40 else prompt}"
+                for name, t, prompt in inserted_actions
+            )
             logger.info(
-                f"chat_message_builder: 在聊天 {chat_id} 的上下文中插入了 {inserted_count} 条动作记录 (time_range={min_time:.0f}-{max_time:.0f})"
+                f"chat_message_builder: 在聊天 {chat_id} 的上下文中插入了 {inserted_count} 条动作记录 (time_range={min_time:.0f}-{max_time:.0f}): {preview}"
             )
 
         # 重新按时间排序
