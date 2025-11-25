@@ -475,6 +475,9 @@ class ImageManager:
             return None
 
 
+image_manager: Optional[ImageManager] = None
+
+
 def get_image_manager() -> ImageManager:
     """获取全局图片管理器单例"""
     global image_manager

@@ -416,6 +416,7 @@ class Person:
         person.know_since = time.time()
         person.last_know = time.time()
         person.memory_points = []
+        person.relation_status = None
         person.group_nick_name = []  # 初始化群昵称列表
 
         # 如果是群聊，添加群昵称
@@ -440,6 +441,7 @@ class Person:
         self.know_since: Optional[float] = None
         self.last_know: Optional[float] = None
         self.memory_points: List[MemoryPointDict] = []
+        self.relation_status: Optional[str] = None
         self.group_nick_name: List[dict[str, str]] = []
         self.is_known = False
         self._group_memory_cache: dict[str, List[MemoryPointDict]] = {}
@@ -990,6 +992,7 @@ class Person:
                 self.person_name = record.person_name or self.nickname
                 self.name_reason = record.name_reason or None
                 self.know_times = record.know_times or 0
+                self.relation_status = getattr(record, "relation_status", None)
 
                 # 处理points字段（JSON格式的列表）
                 if record.memory_points:
@@ -1049,6 +1052,7 @@ class Person:
                 "memory_points": json.dumps(self.memory_points, ensure_ascii=False)
                 if self.memory_points
                 else json.dumps([], ensure_ascii=False),
+                "relation_status": self.relation_status,
                 "group_nick_name": json.dumps(self.group_nick_name, ensure_ascii=False)
                 if self.group_nick_name
                 else json.dumps([], ensure_ascii=False),
@@ -1072,6 +1076,30 @@ class Person:
         except Exception as e:
             logger.error(f"同步用户 {self.person_id} 信息到数据库时出错: {e}")
 
+    def _get_relation_status_dict(self) -> Optional[dict[str, Any]]:
+        raw = self.relation_status
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _get_relation_status_summary(self) -> Optional[str]:
+        data = self._get_relation_status_dict()
+        if isinstance(data, dict):
+            summary = data.get("summary")
+            if isinstance(summary, str):
+                summary = summary.strip()
+                if summary:
+                    return summary
+        if isinstance(self.relation_status, str):
+            text = self.relation_status.strip()
+            if text:
+                return text
+        return None
+
     async def build_relationship(self, chat_content: str = "", info_type=""):
         if not self.is_known:
             return ""
@@ -1080,9 +1108,6 @@ class Person:
         nickname_str = ""
         if self.person_name != self.nickname:
             nickname_str = f"(ta在{self.platform}上的昵称是{self.nickname})"
-
-        relation_info = ""
-
         points_text = ""
         category_list = self.get_all_category()
 
@@ -1143,9 +1168,23 @@ class Person:
         if points_text:
             points_info = f"你还记得有关{self.person_name}的内容：{points_text}"
 
-        if not (nickname_str or points_info):
+        relation_status_text = ""
+        relation_summary = self._get_relation_status_summary()
+        if relation_summary:
+            relation_status_text = f"你目前对{self.person_name}的关系状态总结是：{relation_summary}"
+
+        if not (nickname_str or points_info or relation_status_text):
             return ""
-        relation_info = f"{self.person_name}:{nickname_str}{points_info}"
+
+        parts: list[str] = []
+        if nickname_str:
+            parts.append(nickname_str)
+        if relation_status_text:
+            parts.append(relation_status_text)
+        if points_info:
+            parts.append(points_info)
+
+        relation_info = f"{self.person_name}:" + "".join(parts)
 
         return relation_info
 
@@ -1161,26 +1200,57 @@ class Person:
         
         # 2. Generate summary using LLM
         prompt = f"""根据以下聊天内容和已有记忆，总结你与用户 {self.person_name} 的关系变化或当前状态。
-        
+
 聊天内容:
-{chat_context}
+{chat_content}
 
 {retrieval_context}
 
-要求：
-1. 简明扼要，一句话概括。
-2. 侧重于态度、情感、承诺或重要事件。
-3. 如果没有值得记录的关系变化，输出 "无"。
+请你输出一个 JSON 对象，包含以下字段：
+- "summary": 必填，一句话关系总结，尽量简短。
+- "level": 可选，关系亲近程度标签，例如："陌生人"、"普通朋友"、"好朋友"、"亲密"、"疏远"、"紧张"、"敌对"、"未知" 等。
+- "tags": 可选，字符串数组，列出 0~5 个简短标签，例如 ["经常聊天","互相吐槽"]。
+
+如果没有值得记录的关系变化，请输出：{{"summary": "无"}}
+
+只输出 JSON，不要输出其它任何解释或前后缀。
 """
         response, _ = await relation_selection_model.generate_response_async(prompt)
-        summary = response.strip()
-        
-        if summary == "无" or not summary:
+        raw = (response or "").strip()
+        if not raw:
             return ""
-            
-        # 3. Store
-        self.add_memory_point(summary, category="关系", source=source, context=chat_context[:100] if chat_context else None)
-        
+
+        try:
+            fixed = repair_json(raw)
+            if isinstance(fixed, str):
+                data = json.loads(fixed)
+            else:
+                data = fixed
+        except Exception as e:
+            logger.warning(f"解析关系状态 JSON 失败，将使用纯文本结果: {e}")
+            data = {"summary": raw}
+
+        if not isinstance(data, dict):
+            logger.warning(f"关系状态 JSON 结构非字典，忽略: {data}")
+            return ""
+
+        summary = str(data.get("summary") or "").strip()
+        if not summary or summary == "无":
+            return ""
+
+        normalized: dict[str, Any] = {"summary": summary}
+        level = data.get("level")
+        if isinstance(level, str) and level.strip():
+            normalized["level"] = level.strip()
+        tags = data.get("tags")
+        if isinstance(tags, list):
+            clean_tags = [str(t).strip() for t in tags if str(t).strip()]
+            if clean_tags:
+                normalized["tags"] = clean_tags
+
+        self.relation_status = json.dumps(normalized, ensure_ascii=False)
+        self.sync_to_database()
+
         return summary
 
 
