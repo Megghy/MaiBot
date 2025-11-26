@@ -144,6 +144,8 @@ MIN_QA_ANALYSIS_CONFIDENCE = 0.75  # 低于该置信度的结果将被丢弃
 
 MAX_QUESTIONS_PER_TURN = 2
 
+MIN_JARGON_FALLBACK_CONFIDENCE = 0.75
+
 # 定义特殊工具用于提交答案
 SPECIAL_TOOL_DEFINITIONS = [
     {
@@ -548,7 +550,99 @@ Action: 调用 `found_answer(answer="昨天张三提到了GitHub", source="memor
     )
 
 
-async def _retrieve_concepts_with_jargon(concepts: List[str], chat_id: str) -> str:
+async def _fallback_explain_concepts_with_llm(
+    concepts: List[str], context: str, chat_id: str
+) -> Dict[str, str]:
+    if not concepts:
+        return {}
+
+    from src.jargon.jargon_miner import store_jargon_from_answer
+
+    safe_context = (context or "").strip()
+    if safe_context:
+        safe_context = _truncate_text(safe_context, 800)
+
+    prompt_parts: List[str] = []
+    prompt_parts.append("你是一个帮助解释词语含义的助手。")
+    prompt_parts.append("请阅读给定的概念列表和可选的对话上下文，给出每个概念在当前语境下最可能的含义，并评估你的置信度（0-1）。")
+    prompt_parts.append("只在你认为自己有足够把握时返回该概念；如果不确定或上下文不足，请不要为该概念返回结果。")
+    prompt_parts.append("输出一个 JSON 数组，每个元素是一个对象，格式如下：")
+    prompt_parts.append("[{\"term\": \"概念\", \"meaning\": \"含义\", \"confidence\": 0.9}]")
+    prompt_parts.append("要求：")
+    prompt_parts.append("- 只输出 JSON，不要有任何多余文字；")
+    prompt_parts.append("- confidence 为 0 到 1 之间的数字，0 表示完全不确定，1 表示非常确定；")
+    prompt_parts.append("- 不要编造与常识明显冲突的含义；")
+    prompt_parts.append("- 当无法确定某个概念的含义时，直接省略该条目。")
+    concepts_text = ", ".join(concepts)
+    prompt_parts.append(f"概念列表：{concepts_text}")
+    if safe_context:
+        prompt_parts.append("相关上下文：")
+        prompt_parts.append(safe_context)
+    prompt = "\n".join(prompt_parts)
+
+    try:
+        success, response, _, _ = await llm_api.generate_with_model(
+            prompt,
+            model_config=model_config.model_task_config.utils_small,
+            request_type="memory.jargon_fallback",
+        )
+    except Exception as e:
+        logger.error(f"jargon fallback LLM 调用失败: {e}")
+        return {}
+
+    if not success or not response:
+        logger.error(f"jargon fallback LLM 返回失败: {response}")
+        return {}
+
+    try:
+        json_pattern = r"```json\s*(.*?)\s*```"
+        matches = re.findall(json_pattern, response, re.DOTALL)
+        json_str = matches[0] if matches else response.strip()
+        repaired = repair_json(json_str)
+        parsed = json.loads(repaired)
+    except Exception as e:
+        logger.error(f"解析 jargon fallback JSON 失败: {e}, 响应: {response[:200]}...")
+        return {}
+
+    if isinstance(parsed, dict):
+        items = [parsed]
+    elif isinstance(parsed, list):
+        items = parsed
+    else:
+        logger.warning(f"jargon fallback JSON 不是数组或对象: {parsed}")
+        return {}
+
+    results: Dict[str, str] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        term = str(item.get("term") or item.get("concept") or "").strip()
+        meaning = str(item.get("meaning") or "").strip()
+        if not term or not meaning:
+            continue
+        confidence_raw = item.get("confidence")
+        confidence = 0.0
+        try:
+            confidence = float(confidence_raw) if confidence_raw is not None else 0.0
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if confidence < MIN_JARGON_FALLBACK_CONFIDENCE:
+            continue
+        results[term] = meaning
+
+    if not results:
+        return {}
+
+    for term, meaning in results.items():
+        try:
+            asyncio.create_task(store_jargon_from_answer(term, meaning, chat_id))
+        except Exception as e:
+            logger.error(f"异步写入 jargon 失败: {e}")
+
+    return results
+
+
+async def _retrieve_concepts_with_jargon(concepts: List[str], chat_id: str, context: str = "") -> str:
     """对概念列表进行jargon检索
     
     优先使用向量语义搜索，若无结果则fallback到数据库字符串搜索
@@ -567,6 +661,7 @@ async def _retrieve_concepts_with_jargon(concepts: List[str], chat_id: str) -> s
     from src.common.vector_store.manager import vector_manager
 
     results = []
+    unknown_concepts: List[str] = []
     for concept in concepts:
         concept = concept.strip()
         if not concept:
@@ -638,6 +733,21 @@ async def _retrieve_concepts_with_jargon(concepts: List[str], chat_id: str) -> s
                     results.append("；".join(output_parts) if len(output_parts) > 1 else output_parts[0])
         else:
             logger.info(f"在jargon库中未找到匹配: {concept}")
+            unknown_concepts.append(concept)
+
+    if unknown_concepts:
+        try:
+            fallback_map = await _fallback_explain_concepts_with_llm(unknown_concepts, context, chat_id)
+        except Exception as e:
+            logger.error(f"jargon fallback 解释失败: {e}")
+            fallback_map = {}
+        if fallback_map:
+            for concept in unknown_concepts:
+                meaning = fallback_map.get(concept)
+                if meaning:
+                    meaning_text = meaning.strip()
+                    if meaning_text:
+                        results.append(f"'{concept}' 的含义为：{meaning_text}")
 
     if results:
         return "【概念检索结果】\n" + "\n".join(results) + "\n"
@@ -1465,7 +1575,7 @@ async def build_memory_retrieval_prompt(
         concept_info_found = False
         if concepts:
             logger.info(f"开始对 {len(concepts)} 个概念进行jargon检索")
-            concept_info = await _retrieve_concepts_with_jargon(concepts, chat_id)
+            concept_info = await _retrieve_concepts_with_jargon(concepts, chat_id, context=focus_summary)
             if concept_info:
                 initial_info += concept_info
                 concept_info_found = True
@@ -1533,6 +1643,9 @@ async def build_memory_retrieval_prompt(
                 logger.debug(f"添加缓存记忆: {question_line[:50]}...")
 
         end_time = time.time()
+
+        if initial_info:
+            all_results.insert(0, initial_info.strip())
 
         if all_results:
             retrieved_memory = "\n\n".join(all_results)
