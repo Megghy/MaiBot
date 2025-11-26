@@ -150,6 +150,7 @@ class DefaultReplyer(BaseReplyer):
         personality_prompt: str = gather_results["personality_prompt"]
         memory_retrieval: str = gather_results["memory_retrieval"]
         mood_state_prompt: str = gather_results["mood_state_prompt"]
+        relation_info: str = gather_results["relation_info"]
         keywords_reaction_prompt = await self.build_keywords_reaction_prompt(target)
 
         # 从 chosen_actions 中提取 planner 的整体思考理由
@@ -198,7 +199,7 @@ class DefaultReplyer(BaseReplyer):
             tool_results_block=tool_results_block,
             knowledge_prompt=prompt_info,
             mood_state=mood_state_prompt,
-            # relation_info_block=relation_info,
+            relation_info_block=relation_info,
             extra_info_block=extra_info_block,
             # identity=personality_prompt,
             action_descriptions=actions_info,

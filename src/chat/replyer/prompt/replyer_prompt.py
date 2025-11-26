@@ -30,7 +30,7 @@ def init_replyer_prompt():
 
     Prompt(
         """{knowledge_prompt}{tool_results_block}{extra_info_block}
-{expression_habits_block}{memory_retrieval}{person_memory_block}
+{expression_habits_block}{memory_retrieval}{person_memory_block}{relation_info_block}
 
 下面是群里正在聊的内容:
 {time_block}
@@ -38,9 +38,12 @@ def init_replyer_prompt():
 
 {reply_target_block}。
 {planner_reasoning}
-上面这段是你在规划阶段对是否需要回复以及如何回复做出的整体判断，现在请在不违反安全和合规要求的前提下，优先遵从这个判断进行具体回复，而不是保持沉默。
-{chat_prompt}现在请你读读之前的聊天记录，然后给出日常且口语化的回复，{mood_state}
-尽量简短一些。{keywords_reaction_prompt}请注意把握聊天内容，不要回复的太有条理，可以有个性。
+
+{chat_prompt}现在请你阅读之前的聊天记录，然后给出日常且口语化的回复.
+
+{mood_state}
+
+{keywords_reaction_prompt}
 现在，你说：""",
         "replyer_user_prompt",
     )
