@@ -37,14 +37,14 @@ def init_prompt() -> None:
 
 格式示例：
 [
-    {
+    \{
         "situation": "对某件事表示十分惊叹",
         "style": "我嘞个xxxx"
-    },
-    {
+    \},
+    \{
         "situation": "表示讽刺的赞同，不讲道理",
         "style": "对对对"
-    }
+    \}
 ]
 
 请注意：
@@ -69,10 +69,10 @@ def init_prompt() -> None:
 
 请以JSON格式输出匹配结果，格式为对象列表：
 [
-    {
+    \{
         "expression_pair": 1,
         "context": "与表达方式对应的原文句子的原始内容，不要修改原文句子的内容"
-    },
+    \},
     ...
 ]
 

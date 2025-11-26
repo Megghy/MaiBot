@@ -15,6 +15,10 @@ from src.common.database.database import db
 from src.common.database.database_model import Images, ImageDescriptions
 from src.config.config import global_config, model_config
 from src.llm_models.utils_model import LLMRequest
+from src.chat.utils.chat_message_builder import (
+    get_raw_msg_before_timestamp_with_chat,
+    build_readable_messages,
+)
 
 install(extra_lines=3)
 
@@ -271,7 +275,44 @@ class ImageManager:
         except Exception as e:
             logger.error(f"保存表情包记录失败: {e}")
 
-    async def get_image_description(self, image_base64: str) -> str:
+    def _build_chat_context_for_image(
+        self,
+        chat_id: Optional[str],
+        message_time: Optional[float],
+    ) -> str:
+        """为图片解析构建简短的聊天上下文"""
+        if not chat_id or message_time is None:
+            return ""
+        try:
+            messages = get_raw_msg_before_timestamp_with_chat(
+                chat_id=chat_id,
+                timestamp=message_time,
+                limit=int(global_config.chat.max_context_size * 0.3),
+            )
+            if not messages:
+                return ""
+
+            chat_context = build_readable_messages(
+                messages=messages,
+                replace_bot_name=True,
+                timestamp_mode="normal_no_YMD",
+                read_mark=0.0,
+                truncate=True,
+                show_actions=False,
+                show_pic=True,
+                show_pic_mapping_header=False,
+            )
+            return chat_context
+        except Exception as e:
+            logger.error(f"构建图片上下文失败: {e}")
+            return ""
+
+    async def get_image_description(
+        self,
+        image_base64: str,
+        chat_id: Optional[str] = None,
+        message_time: Optional[float] = None,
+    ) -> str:
         """获取图片描述"""
         try:
             image_bytes, image_hash, image_format = self._decode_image(image_base64)
@@ -296,9 +337,19 @@ class ImageManager:
                 return f"[图片：{cached}]"
 
             # 3. VLM 生成
-            prompt = PROMPTS["image"] + f"\n\n{global_config.personality.visual_style}"
+            prompt = PROMPTS["image"]
+            if chat_id and message_time:
+                chat_context = self._build_chat_context_for_image(chat_id, message_time)
+                if chat_context:
+                    prompt = (
+                        prompt
+                        + "\n\n以下是与这张图片相关的聊天上下文，仅用于帮助你理解图片含义，不要逐句复述：\n"
+                        + chat_context
+                    )
+
+            prompt += f"\n\n{global_config.personality.visual_style}"
             logger.info(f"[VLM调用] 生成图片描述 (Hash: {image_hash[:8]}...)")
-            
+
             description, _ = await self.vlm.generate_response_for_image(
                 prompt, image_base64, image_format, temperature=0.4
             )
@@ -353,7 +404,12 @@ class ImageManager:
         except Exception as e:
             logger.error(f"保存图片记录失败: {e}")
 
-    async def process_image(self, image_base64: str) -> Tuple[str, str]:
+    async def process_image(
+        self,
+        image_base64: str,
+        chat_id: Optional[str] = None,
+        message_time: Optional[float] = None,
+    ) -> Tuple[str, str]:
         """处理图片并返回图片ID和描述占位符"""
         try:
             _, image_hash, _ = self._decode_image(image_base64)
@@ -393,25 +449,40 @@ class ImageManager:
                 logger.error(f"创建图片初始记录失败: {e}")
 
             # 启动异步处理
-            await self._process_image_with_vlm(image_id, image_base64)
+            await self._process_image_with_vlm(
+                image_id,
+                image_base64,
+                chat_id=chat_id,
+                message_time=message_time,
+            )
             return image_id, f"[picid:{image_id}]"
 
         except Exception as e:
             logger.error(f"处理图片失败: {e}")
             return "", "[图片]"
 
-    async def _process_image_with_vlm(self, image_id: str, image_base64: str) -> None:
+    async def _process_image_with_vlm(
+        self,
+        image_id: str,
+        image_base64: str,
+        chat_id: Optional[str] = None,
+        message_time: Optional[float] = None,
+    ) -> None:
         """使用VLM处理图片并更新数据库"""
         try:
-            description_text = await self.get_image_description(image_base64)
-            
+            description_text = await self.get_image_description(
+                image_base64,
+                chat_id=chat_id,
+                message_time=message_time,
+            )
+
             description = ""
             if description_text.startswith("[图片：") and description_text.endswith("]"):
                 description = description_text[4:-1]
 
             if description:
                 Images.update(description=description, vlm_processed=True).where(Images.image_id == image_id).execute()
-                
+
         except Exception as e:
             logger.error(f"VLM后台处理图片失败: {e}")
 

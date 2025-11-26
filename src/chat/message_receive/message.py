@@ -173,7 +173,13 @@ class MessageRecv(Message):
                     self.is_emoji = False
                     image_manager = get_image_manager()
                     # print(f"segment.data: {segment.data}")
-                    _, processed_text = await image_manager.process_image(segment.data)
+                    chat_id = getattr(self, "chat_stream", None) and self.chat_stream.stream_id
+                    msg_time = getattr(self.message_info, "time", None)
+                    _, processed_text = await image_manager.process_image(
+                        segment.data,
+                        chat_id=chat_id,
+                        message_time=msg_time,
+                    )
                     return processed_text
                 return "[发了一张图片，网卡了加载不出来]"
             elif segment.type == "emoji":
