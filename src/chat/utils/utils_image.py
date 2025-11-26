@@ -15,10 +15,6 @@ from src.common.database.database import db
 from src.common.database.database_model import Images, ImageDescriptions
 from src.config.config import global_config, model_config
 from src.llm_models.utils_model import LLMRequest
-from src.chat.utils.chat_message_builder import (
-    get_raw_msg_before_timestamp_with_chat,
-    build_readable_messages,
-)
 
 install(extra_lines=3)
 
@@ -284,6 +280,11 @@ class ImageManager:
         if not chat_id or message_time is None:
             return ""
         try:
+            from src.chat.utils.chat_message_builder import (
+                get_raw_msg_before_timestamp_with_chat,
+                build_readable_messages,
+            )
+
             messages = get_raw_msg_before_timestamp_with_chat(
                 chat_id=chat_id,
                 timestamp=message_time,
