@@ -480,9 +480,10 @@ class BrainPlanner:
                  actions = self._create_no_reply(f"解析LLM工具调用失败: {json_e}", available_actions)
         else:
             logger.warning(f"{self.log_prefix}LLM没有返回工具调用: {llm_content}")
-            reason = "规划器没有返回有效的动作选择"
             if llm_content:
-                reason = f"规划器未选择动作，回复内容: {llm_content[:50]}..."
+                reason = "规划器未选择动作（LLM 返回的内容未能解析为有效的工具调用）"
+            else:
+                reason = "规划器没有返回有效的动作选择"
             actions = self._create_no_reply(reason, available_actions)
 
         # 添加循环开始时间到所有非no_reply动作

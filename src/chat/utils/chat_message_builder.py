@@ -505,8 +505,8 @@ def _build_readable_messages_internal(
         id_prefix = f"[{message_id}]" if message_id else ""
 
         if is_action:
-            # 对于动作记录，使用特殊格式
-            output_lines.append(f"{id_prefix}{readable_time}, {content}")
+            # 对于动作记录，使用特殊格式，并提示其含义
+            output_lines.append(f"{id_prefix}{readable_time}, [动作记录] {content}")
         else:
             output_lines.append(f"{id_prefix}{readable_time}, {name}: {content}")
         output_lines.append("\n")  # 在每个消息块后添加换行，保持可读性
@@ -834,7 +834,7 @@ def build_readable_messages(
                 f"{name}@{t:.0f}:{(prompt[:40] + '...') if len(prompt) > 40 else prompt}"
                 for name, t, prompt in inserted_actions
             )
-            logger.info(
+            logger.debug(
                 f"chat_message_builder: 在聊天 {chat_id} 的上下文中插入了 {inserted_count} 条动作记录 (time_range={min_time:.0f}-{max_time:.0f}): {preview}"
             )
 
