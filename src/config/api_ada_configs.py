@@ -99,6 +99,9 @@ class ModelTaskConfig(ConfigBase):
     utils_small: TaskConfig
     """组件小模型配置"""
 
+    expression: TaskConfig
+    """表达学习模型配置"""
+
     replyer: TaskConfig
     """normal_chat首要回复模型模型配置"""
 

@@ -32,7 +32,7 @@ def init_replyer_prompt():
         """{knowledge_prompt}{tool_results_block}{extra_info_block}
 {expression_habits_block}{memory_retrieval}{person_memory_block}
 
-下面是群里正在聊的内容，其中包含聊天记录和聊天中的图片:
+下面是群里正在聊的内容:
 {time_block}
 {dialogue_prompt}
 

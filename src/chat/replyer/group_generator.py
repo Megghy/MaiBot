@@ -39,6 +39,7 @@ class DefaultReplyer(BaseReplyer):
             replace_bot_name=True,
             timestamp_mode="normal_no_YMD",
             truncate=True,
+            show_pic_mapping_header=False,
         )
 
     async def build_prompt_reply_context(
@@ -128,6 +129,7 @@ class DefaultReplyer(BaseReplyer):
             timestamp_mode="relative",
             read_mark=0.0,
             show_actions=True,
+            show_pic_mapping_header=False,
         )
 
         gather_results = await self._gather_common_reply_blocks(

@@ -502,6 +502,20 @@ class BrainChatting:
 
                 elif action_planner_info.action_type == "reply":
                     try:
+                        # 在生成回复前先记录本次回复的整体思考理由，便于后续调试与上下文构建
+                        reason = (action_planner_info.reasoning or "").strip()
+                        if reason:
+                            await database_api.store_action_info(
+                                chat_stream=self.chat_stream,
+                                action_build_into_prompt=True,
+                                action_prompt_display=reason,
+                                action_done=True,
+                                thinking_id=thinking_id,
+                                action_data={},
+                                action_name="reply",
+                                action_reasoning=reason,
+                            )
+
                         success, llm_response = await generator_api.generate_reply(
                             chat_stream=self.chat_stream,
                             reply_message=action_planner_info.action_message,

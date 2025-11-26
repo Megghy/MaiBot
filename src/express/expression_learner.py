@@ -27,11 +27,15 @@ def init_prompt() -> None:
     learn_style_prompt = """
 {chat_str}
 
-请从上面这段群聊中概括除了人名为"SELF"之外的人的语言风格。
-1. 只考虑文字，不要考虑表情包和图片。
-2. 不要涉及具体的人名，但是可以涉及具体名词。
-3. 思考有没有特殊的梗，一并总结成语言风格。
-4. 例子仅供参考，请严格根据群聊内容总结!!!
+请从上面这段群聊中学习除了人名为"SELF"之外的人的**通用表达风格**。
+目标是提取出可以在**不同话题**下复用的句式、语气词或修辞手法。
+
+请遵循以下原则：
+1. **抽象化**：忽略具体的人名、商品名、数字、地名等具体内容。如果原文内容强依赖具体名词，请不要提取，或者用 [名词]、[数字] 等占位符替换。
+2. **关注句式**：重点关注倒装、反问、重复、夸张、特殊的语气助词、特定梗的变体等。
+3. **排除陈述**：不要提取单纯的陈述句、事实描述、商品介绍（如“有酸豆角包”、“16.9十袋”）。
+4. **拒绝行为**：不要提取具体的行为决策（如“不吃方便面”），除非它是某种特定的拒绝句式（如“狗都不吃”）。
+5. **可复用性**：提取的结果必须能应用在完全不同的对话场景中。
 
 请以JSON格式输出总结结果，包含一个列表，每个元素包含 "situation" (情境) 和 "style" (风格/句式) 两个字段。
 
@@ -39,18 +43,26 @@ def init_prompt() -> None:
 [
     \{
         "situation": "对某件事表示十分惊叹",
-        "style": "我嘞个xxxx"
+        "style": "我嘞个豆"
     \},
     \{
-        "situation": "表示讽刺的赞同，不讲道理",
-        "style": "对对对"
+        "situation": "表示讽刺的赞同",
+        "style": "好好好，这么玩是吧"
+    \},
+    \{
+        "situation": "用夸张的条件表达意愿",
+        "style": "如果能[X]，就是让我[Y]也愿意啊"
+    \},
+     \{
+        "situation": "强调某事物的特征",
+        "style": "主打一个[特征]"
     \}
 ]
 
 请注意：
 1. 不要总结你自己（SELF）的发言。
-2. situation 描述不超过30个字。
-3. style 必须是提取自原文或原文的某种特定句式，不超过30个字。
+2. situation 描述不超过30个字，描述说话人的情绪或意图，而非具体事件。
+3. style 必须是原文中体现风格的核心片段，或者是经过抽象后的模板。
 4. 直接输出JSON数组，不要包含Markdown代码块标记。
 
 现在请你概括：
@@ -90,7 +102,7 @@ def init_prompt() -> None:
 class ExpressionLearner:
     def __init__(self, chat_id: str) -> None:
         self.express_learn_model: LLMRequest = LLMRequest(
-            model_set=model_config.model_task_config.utils, request_type="expression.learner"
+            model_set=model_config.model_task_config.expression, request_type="expression.learner"
         )
         self.summary_model: LLMRequest = LLMRequest(
             model_set=model_config.model_task_config.utils_small, request_type="expression.summary"

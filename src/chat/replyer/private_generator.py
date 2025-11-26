@@ -82,6 +82,7 @@ class PrivateReplyer(BaseReplyer):
             timestamp_mode="relative",
             read_mark=0.0,
             show_actions=True,
+            show_pic_mapping_header=False,
         )
 
         message_list_before_short = get_raw_msg_before_timestamp_with_chat(
@@ -113,6 +114,7 @@ class PrivateReplyer(BaseReplyer):
             timestamp_mode="relative",
             read_mark=0.0,
             show_actions=True,
+            show_pic_mapping_header=False,
         )
 
         gather_results = await self._gather_common_reply_blocks(
@@ -216,6 +218,7 @@ class PrivateReplyer(BaseReplyer):
                 sender_name=sender,
                 memory_retrieval=memory_retrieval,
                 chat_prompt=chat_prompt_block,
+                planner_reasoning=planner_reasoning,
                 person_memory_block=person_memory_block,
             )
 

@@ -349,10 +349,14 @@ async def store_action_info(
             "action_name": action_name,
             "action_data": json.dumps(action_data or {}, ensure_ascii=False),
             "action_done": action_done,
-            "action_reasoning": action_reasoning,
-            "action_build_into_prompt": action_build_into_prompt,
             "action_prompt_display": action_prompt_display,
         }
+
+        # 仅在显式提供时更新推理与是否构建进 Prompt 的标记，避免后续调用覆盖已有值
+        if action_reasoning:
+            record_data["action_reasoning"] = action_reasoning
+        if action_build_into_prompt:
+            record_data["action_build_into_prompt"] = action_build_into_prompt
 
         # 从chat_stream获取聊天信息
         if chat_stream:
