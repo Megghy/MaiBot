@@ -15,7 +15,11 @@ from src.config.config import global_config, model_config
 from src.llm_models.utils_model import LLMRequest
 from src.plugin_system.apis import message_api
 from src.chat.utils.chat_message_builder import build_readable_messages
-from src.person_info.person_info import Person, store_person_memory_from_answer
+from src.person_info.person_info import (
+    Person,
+    store_person_memory_from_answer,
+    get_person_id_by_person_name,
+)
 from src.chat.message_receive.chat_stream import get_chat_manager
 
 logger = get_logger("chat_history_summarizer")
@@ -465,16 +469,44 @@ class ChatHistorySummarizer:
         if not participants or not summary:
             return
 
+        # 过滤掉bot自己的名字
+        bot_nickname = global_config.bot.nickname
+        filtered_participants = [p for p in participants if p != bot_nickname]
+
+        if not filtered_participants:
+            return
+
         trimmed_summary = summary.strip()
         trimmed_original = (original_text or "").strip()
         if len(trimmed_original) > 2000:
             trimmed_original = trimmed_original[:2000]
 
+        # 获取参与者现有记忆 (Top 15)
+        existing_memories_text = ""
+        for p_name in filtered_participants:
+            try:
+                pid = get_person_id_by_person_name(p_name)
+                if pid:
+                    person = Person(person_id=pid)
+                    if person.memory_points:
+                        mems = [m.get("content", "").strip() for m in person.memory_points if m.get("content")]
+                        if mems:
+                            recent = mems[-15:]
+                            existing_memories_text += f"\n【{p_name}】的现有记忆 (参考):\n" + "\n".join([f"- {m}" for m in recent])
+            except Exception:
+                pass
+        
+        if not existing_memories_text:
+            existing_memories_text = "（暂无相关记忆）"
+
         prompt = f"""你是一个对话分析助手。请根据提供的聊天话题概括，为参与者整理可写入个性记忆的要点。
 
-参与者：{participants}
+参与者：{filtered_participants}
 话题概括：{trimmed_summary}
 补充原文片段（可为空）：{trimmed_original}
+
+现有记忆参考：
+{existing_memories_text}
 
 请输出JSON数组，每个元素格式：
 {{
@@ -486,7 +518,9 @@ class ChatHistorySummarizer:
 要求：
 1. 仅在记忆与该参与者密切相关时输出条目。
 2. 每个 memory_points 文本不超过 20 字，聚焦事实或稳定偏好。
-3. 如果没有任何记忆，请返回 []。
+3. 参考现有记忆，避免重复记录完全相同的信息。
+4. 如果发现与现有记忆冲突的新信息，请生成新的记忆点以反映变化。
+5. 如果没有任何值得记录的新记忆，请返回 []。
 """
 
         try:
@@ -507,7 +541,7 @@ class ChatHistorySummarizer:
             else:
                 parsed_entries = []
 
-            participant_set = {p for p in participants if isinstance(p, str) and p}
+            participant_set = {p for p in filtered_participants if isinstance(p, str) and p}
 
             for entry in parsed_entries:
                 if not isinstance(entry, dict):
