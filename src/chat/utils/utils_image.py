@@ -36,11 +36,19 @@ PROMPTS = {
         "最后总结对聊天最有用的关键信息和整体情绪。语气自然口语化，简洁明了, 一段话给出, **不进行分段分点**"
     ),
     "emotion": (
-        "基于表情包描述提取3-8个聊天风格的情绪/风格标签\n"
-        "要求：标签简练，逗号分隔，不要解释，去重。\n"
+        "基于表情包描述提取3-10个聊天风格的情绪/风格标签\n"
+        "要求：标签简练，可以使词语或短语，逗号分隔，不要解释，去重。\n"
         "描述：'{description}'"
     )
 }
+
+
+def _decode_image_bytes_and_hash(image_base64: str) -> Tuple[bytes, str]:
+    if isinstance(image_base64, str):
+        image_base64 = image_base64.encode("ascii", errors="ignore").decode("ascii")
+    image_bytes = base64.b64decode(image_base64)
+    image_hash = hashlib.md5(image_bytes).hexdigest()
+    return image_bytes, image_hash
 
 
 class ImageManager:
@@ -88,11 +96,8 @@ class ImageManager:
 
     def _decode_image(self, image_base64: str) -> Tuple[bytes, str, str]:
         """解码并获取图片信息 -> (bytes, hash, format)"""
-        if isinstance(image_base64, str):
-            image_base64 = image_base64.encode("ascii", errors="ignore").decode("ascii")
-        image_bytes = base64.b64decode(image_base64)
-        image_hash = hashlib.md5(image_bytes).hexdigest()
-        
+        image_bytes, image_hash = _decode_image_bytes_and_hash(image_base64)
+
         try:
             with Image.open(io.BytesIO(image_bytes)) as img:
                 image_format = (img.format or "PNG").lower()

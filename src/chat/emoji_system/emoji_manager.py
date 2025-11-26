@@ -13,11 +13,11 @@ from typing import Optional, Tuple, List, Any
 from PIL import Image
 from rich.traceback import install
 
-from src.common.database.database_model import Emoji
+from src.common.database.database_model import Emoji, Images, ImageDescriptions
 from src.common.database.database import db as peewee_db
 from src.common.logger import get_logger
 from src.config.config import global_config, model_config
-from src.chat.utils.utils_image import image_path_to_base64, get_image_manager
+from src.chat.utils.utils_image import image_path_to_base64, get_image_manager, _decode_image_bytes_and_hash
 from src.llm_models.utils_model import LLMRequest
 
 install(extra_lines=3)
@@ -74,11 +74,7 @@ class MaiEmoji:
 
             # 计算哈希值
             logger.debug(f"[初始化] 正在解码Base64并计算哈希: {self.filename}")
-            # 确保base64字符串只包含ASCII字符
-            if isinstance(image_base64, str):
-                image_base64 = image_base64.encode("ascii", errors="ignore").decode("ascii")
-            image_bytes = base64.b64decode(image_base64)
-            self.hash = hashlib.md5(image_bytes).hexdigest()
+            image_bytes, self.hash = _decode_image_bytes_and_hash(image_base64)
             logger.debug(f"[初始化] 哈希计算成功: {self.hash}")
 
             # 获取图片格式
@@ -910,69 +906,66 @@ class EmojiManager:
             Tuple[str, list]: 返回表情包描述和情感列表
         """
         try:
-            # 解码图片并获取格式
-            # 确保base64字符串只包含ASCII字符
-            if isinstance(image_base64, str):
-                image_base64 = image_base64.encode("ascii", errors="ignore").decode("ascii")
-            image_bytes = base64.b64decode(image_base64)
-            image_hash = hashlib.md5(image_bytes).hexdigest()
+            # 解码图片并获取 hash / format（统一使用 utils_image 的工具）
+            image_bytes, image_hash = _decode_image_bytes_and_hash(image_base64)
             image_format = Image.open(io.BytesIO(image_bytes)).format.lower()  # type: ignore
 
-            # 尝试从Images表获取已有的详细描述（可能在收到表情包时已生成）
-            existing_description = None
+            description: Optional[str] = None
+            emotions: List[str] = []
+
+            # 优先从 Images / ImageDescriptions 表中复用已生成的描述和情绪标签
             try:
-                from src.common.database.database_model import Images
-
-                existing_image = Images.get_or_none((Images.emoji_hash == image_hash) & (Images.type == "emoji"))
+                existing_image = Images.get_or_none(
+                    (Images.emoji_hash == image_hash) & (Images.type == "emoji")
+                )
                 if existing_image and existing_image.description:
-                    existing_description = existing_image.description
-                    logger.info(f"[复用描述] 找到已有详细描述: {existing_description[:50]}...")
+                    description = existing_image.description
+                    logger.info(f"[复用描述] 找到已有详细描述: {description[:50]}...")
+
+                desc_record = ImageDescriptions.get_or_none(
+                    (ImageDescriptions.image_description_hash == image_hash)
+                    & (ImageDescriptions.type == "emoji")
+                )
+                if desc_record and desc_record.description:
+                    emotions = [
+                        e.strip()
+                        for e in re.split(r"[，,]", desc_record.description)
+                        if e.strip()
+                    ]
+                    logger.info(f"[复用情绪标签] {emotions}")
             except Exception as e:
-                logger.debug(f"查询已有描述时出错: {e}")
+                logger.debug(f"查询已有描述/情绪标签时出错: {e}")
 
-            # 第一步：VLM视觉分析（如果没有已有描述才调用）
-            if existing_description:
-                description = existing_description
-                logger.info("[优化] 复用已有的详细描述，跳过VLM调用")
-            else:
-                logger.info("[VLM分析] 生成新的详细描述")
-                # 根据 VLM 是否为 Gemini-only 决定 GIF 的处理方式
+            # 如果缓存不完整，则调用 ImageManager 统一的表情识别逻辑
+            if not description or not emotions:
                 img_manager = get_image_manager()
-                vlm_is_gemini_only = getattr(img_manager, "vlm_is_gemini_only", False)
+                _ = await img_manager.get_emoji_description(image_base64)
 
-                if image_format in ["gif", "GIF"]:
-                    if vlm_is_gemini_only:
-                        # Gemini 支持直接处理 GIF，不再转成 JPG
-                        prompt = (
-                            "这是一个动态图表情包。请直接用一句话概括它的情绪和梗点，"
-                            "限制在100字以内，侧重表达含义和使用场景，不要写格式或画面细节，"
-                            "也不要出现诸如‘好的，我们来’之类的开场。"
-                        )
-                        description, _ = await self.vlm.generate_response_for_image(
-                            prompt, image_base64, image_format, temperature=0.5
-                        )
-                    else:
-                        image_base64 = img_manager.transform_gif(image_base64)  # type: ignore
-                        if not image_base64:
-                            raise RuntimeError("GIF表情包转换失败")
-                        prompt = (
-                            "这是一个动态图表情包。请直接用一句话概括它的情绪和梗点，"
-                            "限制在100字以内，侧重表达含义和使用场景，不要写格式或画面细节，"
-                            "也不要出现诸如‘好的，我们来’之类的开场。"
-                        )
-                        description, _ = await self.vlm.generate_response_for_image(
-                            prompt, image_base64, "jpg", temperature=0.5
-                        )
-                else:
-                    prompt = (
-                        "这是一个表情包。请用一句紧凑的话概括它表达的情绪、梗点或使用场景，"
-                        "控制在100字以内，聚焦含义，不要描写图像细节，也不要出现寒暄。"
+                try:
+                    existing_image = Images.get_or_none(
+                        (Images.emoji_hash == image_hash) & (Images.type == "emoji")
                     )
-                    description, _ = await self.vlm.generate_response_for_image(
-                        prompt, image_base64, image_format, temperature=0.5
-                    )
+                    if existing_image and existing_image.description:
+                        description = existing_image.description
 
-            # 审核表情包
+                    desc_record = ImageDescriptions.get_or_none(
+                        (ImageDescriptions.image_description_hash == image_hash)
+                        & (ImageDescriptions.type == "emoji")
+                    )
+                    if desc_record and desc_record.description:
+                        emotions = [
+                            e.strip()
+                            for e in re.split(r"[，,]", desc_record.description)
+                            if e.strip()
+                        ]
+                except Exception as e:
+                    logger.debug(f"调用 ImageManager 后查询描述/情绪标签出错: {e}")
+
+            if not description:
+                logger.warning("未能获取表情包详细描述")
+                return "", []
+
+            # 审核表情包（逻辑保持原有实现）
             if global_config.emoji.content_filtration:
                 prompt = f'''
                     这是一个表情包，请对这个表情包进行审核，标准如下：
@@ -988,26 +981,9 @@ class EmojiManager:
                 if content == "否":
                     return "", []
 
-            # 第二步：LLM情感分析 - 基于详细描述生成情感标签列表
-            emotion_prompt = f"""
-这是一个聊天场景中的表情包描述：'{description}'
-
-请你识别这个表情包的含义和适用场景，给我简短的描述，每个描述不要超过30个字
-你可以关注其幽默和讽刺意味，动用贴吧，微博，小红书的知识，必须从互联网梗,meme的角度去分析
-请直接输出描述，不要出现任何其他内容，如果有多个描述，可以用逗号分隔
-            """
-            emotions_text, _ = await self.llm_emotion_judge.generate_response_async(
-                emotion_prompt, temperature=0.7, max_tokens=256
-            )
-
-            # 处理情感列表
-            emotions = [e.strip() for e in emotions_text.split(",") if e.strip()]
-
-            # 根据情感标签数量随机选择 - 超过5个选3个，超过2个选2个
-            if len(emotions) > 5:
-                emotions = random.sample(emotions, 3)
-            elif len(emotions) > 2:
-                emotions = random.sample(emotions, 2)
+            if not emotions:
+                # 如果还没有情绪标签，则简单回退为一个通用标签
+                emotions = ["表情"]
 
             logger.info(f"[注册分析] 描述: {description[:50]}... -> 情感标签: {emotions}")
 
