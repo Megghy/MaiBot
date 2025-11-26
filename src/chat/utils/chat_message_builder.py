@@ -813,7 +813,12 @@ def build_readable_messages(
             # 只有当build_into_prompt为True时才添加动作记录
             if action.action_build_into_prompt:
                 # 优先使用动作的reasoning作为插入到提示词中的文本，其次才是显示用的prompt_display
-                action_content = (action.action_reasoning or "").strip() or str(action.action_prompt_display or "")
+                base_content = (action.action_reasoning or "").strip() or str(action.action_prompt_display or "")
+                action_type = (str(action.action_name) or "").strip()
+                if action_type:
+                    action_content = f"[{action_type}] {base_content}"
+                else:
+                    action_content = base_content
 
                 action_msg = MessageAndActionModel(
                     time=float(action.time),  # type: ignore

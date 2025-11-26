@@ -173,7 +173,8 @@ class ActionPlanner:
             "name": "no_reply",
             "description": "不回复. 当你想保持沉默时使用此项.",
             "parameters": [
-                ("reason", ToolParamType.STRING, "不回复的原因, 用尽可能简短的语句说明", True, None)
+                ("reason", ToolParamType.STRING, "不回复的原因, 用尽可能简短的语句说明", True, None),
+                ("target_message_id", ToolParamType.STRING, "你决定不回复的那条消息的ID (m+数字)", False, None),
             ]
         })
 
@@ -271,7 +272,15 @@ class ActionPlanner:
                     logger.warning(f"{self.log_prefix}无法找到target_message_id '{target_message_id}' 对应的消息")
                     target_message = message_id_list[-1][1]
             else:
+                # 如果缺少 target_message_id，则默认使用最新消息
                 target_message = message_id_list[-1][1]
+
+            # 如果仍然没有 target_message_id，但已经确定了 target_message，则尝试从 message_id_list 中反查消息ID
+            if not target_message_id and target_message is not None:
+                for msg_id, msg in reversed(message_id_list):
+                    if msg is target_message:
+                        target_message_id = msg_id
+                        break
 
             # 验证action是否可用
             available_action_names = [action_name for action_name, _ in current_available_actions]
