@@ -150,11 +150,11 @@ def weighted_sample_no_replacement(items: List[Dict], weights: List[float], k: i
     for _ in range(draw):
         total = sum(max(w, 0.0) for _, w in pool)
         if total <= 0:
-            selection.extend(item for item, _, _ in pool[: draw - len(selection)])
+            selection.extend(item for item, _ in pool[: draw - len(selection)])
             break
         threshold = random.uniform(0, total)
         acc = 0.0
-        for idx, (item, weight, _) in enumerate(pool):
+        for idx, (item, weight) in enumerate(pool):
             acc += max(weight, 0.0)
             if threshold <= acc:
                 selection.append(item)
