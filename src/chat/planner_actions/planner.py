@@ -286,7 +286,13 @@ class ActionPlanner:
                 )
                 action_type = "no_reply"
 
-            structured_reasoning = self._format_action_reasoning(action_type, reasoning, target_message, action_data)
+            structured_reasoning = self._format_action_reasoning(
+                action_type,
+                reasoning,
+                target_message,
+                action_data,
+                target_message_id,
+            )
 
             # 创建ActionPlannerInfo对象
             available_actions_dict = dict(current_available_actions)
@@ -343,6 +349,7 @@ class ActionPlanner:
             read_mark=self.last_obs_time_mark,
             truncate=True,
             show_actions=True,
+            show_pic_mapping_header=False,
         )
 
         message_list_before_now_short = message_list_before_now[-int(global_config.chat.max_context_size * 0.3) :]
@@ -351,6 +358,7 @@ class ActionPlanner:
             timestamp_mode="normal_no_YMD",
             truncate=False,
             show_actions=False,
+            show_pic_mapping_header=False,
         )
 
         self.last_obs_time_mark = time.time()
@@ -653,12 +661,16 @@ class ActionPlanner:
         reasoning: str,
         target_message: Optional["DatabaseMessages"],
         action_data: Dict[str, Any],
+        target_message_id: Optional[str] = None,
     ) -> str:
         parts: List[str] = []
         if reasoning:
             parts.append(reasoning.strip())
 
-        if target_message and (target_message.processed_plain_text or target_message.display_message):
+        # 优先使用消息 ID 引用目标消息，避免在 reason 中重复整段原文
+        if target_message_id:
+            parts.append(f"目标消息: [{target_message_id}]")
+        elif target_message and (target_message.processed_plain_text or target_message.display_message):
             content = target_message.processed_plain_text or target_message.display_message or ""
             content = content.strip()
             if content:

@@ -269,6 +269,7 @@ class BrainPlanner:
             read_mark=self.last_obs_time_mark,
             truncate=True,
             show_actions=True,
+            show_pic_mapping_header=False,
         )
 
         message_list_before_now_short = message_list_before_now[-int(global_config.chat.max_context_size * 0.3) :]
@@ -277,6 +278,7 @@ class BrainPlanner:
             timestamp_mode="normal_no_YMD",
             truncate=False,
             show_actions=False,
+            show_pic_mapping_header=False,
         )
 
         self.last_obs_time_mark = time.time()

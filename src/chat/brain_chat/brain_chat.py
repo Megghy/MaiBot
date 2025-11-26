@@ -263,6 +263,7 @@ class BrainChatting:
                 read_mark=self.action_planner.last_obs_time_mark,
                 truncate=True,
                 show_actions=True,
+                show_pic_mapping_header=False,
             )
 
             prompt_info = await self.action_planner.build_planner_prompt(

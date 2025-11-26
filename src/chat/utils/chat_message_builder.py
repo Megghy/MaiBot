@@ -664,6 +664,7 @@ async def build_readable_messages_with_list(
     replace_bot_name: bool = True,
     timestamp_mode: str = "relative",
     truncate: bool = False,
+    show_pic_mapping_header: bool = True,
 ) -> Tuple[str, List[Tuple[float, str, str]]]:
     """
     将消息列表转换为可读的文本格式，并返回原始(时间戳, 昵称, 内容)列表。
@@ -676,8 +677,9 @@ async def build_readable_messages_with_list(
         truncate,
     )
 
-    if pic_mapping_info := build_pic_mapping_info(pic_id_mapping):
-        formatted_string = f"{pic_mapping_info}\n\n{formatted_string}"
+    if show_pic_mapping_header:
+        if pic_mapping_info := build_pic_mapping_info(pic_id_mapping):
+            formatted_string = f"{pic_mapping_info}\n\n{formatted_string}"
 
     return formatted_string, details_list
 
@@ -691,6 +693,7 @@ def build_readable_messages_with_id(
     show_actions: bool = False,
     show_pic: bool = True,
     remove_emoji_stickers: bool = False,
+    show_pic_mapping_header: bool = True,
 ) -> Tuple[str, List[Tuple[str, DatabaseMessages]]]:
     """
     将消息列表转换为可读的文本格式，并返回原始(时间戳, 昵称, 内容)列表。
@@ -708,6 +711,7 @@ def build_readable_messages_with_id(
         read_mark=read_mark,
         message_id_list=message_id_list,
         remove_emoji_stickers=remove_emoji_stickers,
+        show_pic_mapping_header=show_pic_mapping_header,
     )
 
     return formatted_string, message_id_list
@@ -723,6 +727,7 @@ def build_readable_messages(
     show_pic: bool = True,
     message_id_list: Optional[List[Tuple[str, DatabaseMessages]]] = None,
     remove_emoji_stickers: bool = False,
+    show_pic_mapping_header: bool = True,
 ) -> str:  # sourcery skip: extract-method
     """
     将消息列表转换为可读的文本格式。
@@ -852,12 +857,12 @@ def build_readable_messages(
             message_id_list=message_id_list,
         )
 
-        # 生成图片映射信息并添加到最前面
-        pic_mapping_info = build_pic_mapping_info(pic_id_mapping)
-        if pic_mapping_info:
-            return f"{pic_mapping_info}\n\n{formatted_string}"
-        else:
-            return formatted_string
+        # 生成图片映射信息并添加到最前面（可选）
+        if show_pic_mapping_header:
+            pic_mapping_info = build_pic_mapping_info(pic_id_mapping)
+            if pic_mapping_info:
+                return f"{pic_mapping_info}\n\n{formatted_string}"
+        return formatted_string
     else:
         # 按 read_mark 分割消息
         messages_before_mark = [msg for msg in copy_messages if (msg.time or 0) <= read_mark]
@@ -892,10 +897,12 @@ def build_readable_messages(
         read_mark_line = "\n--- 以上消息是你已经看过，请关注以下未读的新消息---\n"
 
         # 生成图片映射信息
-        if pic_id_mapping:
-            pic_mapping_info = f"图片信息：\n{build_pic_mapping_info(pic_id_mapping)}\n聊天记录信息：\n"
-        else:
-            pic_mapping_info = "聊天记录信息：\n"
+        pic_mapping_info = ""
+        if show_pic_mapping_header:
+            if pic_id_mapping:
+                pic_mapping_info = f"图片信息：\n{build_pic_mapping_info(pic_id_mapping)}\n聊天记录信息：\n"
+            else:
+                pic_mapping_info = "聊天记录信息：\n"
 
         # 组合结果
         result_parts = []

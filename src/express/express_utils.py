@@ -1,8 +1,16 @@
 import re
-import difflib
 import random
 from datetime import datetime
 from typing import Optional, List, Dict
+
+from src.memory_system.memory_utils import calculate_similarity as _calculate_similarity_common
+
+
+# 预编译正则表达式
+_RE_REPLY_PREFIX = re.compile(r"\[回复.*?\]，说：\s*")
+_RE_AT_MENTION = re.compile(r"@<[^>]*>")
+_RE_PIC_ID = re.compile(r"\[picid:[^\]]*\]")
+_RE_EMOJI_PACK = re.compile(r"\[表情包：[^\]]*\]")
 
 
 def filter_message_content(content: Optional[str]) -> str:
@@ -19,21 +27,21 @@ def filter_message_content(content: Optional[str]) -> str:
         return ""
 
     # 移除以[回复开头、]结尾的部分，包括后面的"，说："部分
-    content = re.sub(r"\[回复.*?\]，说：\s*", "", content)
+    content = _RE_REPLY_PREFIX.sub("", content)
     # 移除@<...>格式的内容
-    content = re.sub(r"@<[^>]*>", "", content)
+    content = _RE_AT_MENTION.sub("", content)
     # 移除[picid:...]格式的图片ID
-    content = re.sub(r"\[picid:[^\]]*\]", "", content)
+    content = _RE_PIC_ID.sub("", content)
     # 移除[表情包：...]格式的内容
-    content = re.sub(r"\[表情包：[^\]]*\]", "", content)
+    content = _RE_EMOJI_PACK.sub("", content)
 
     return content.strip()
 
 
 def calculate_similarity(text1: str, text2: str) -> float:
     """
-    计算两个文本的相似度，返回0-1之间的值
-    使用SequenceMatcher计算相似度
+    计算两个文本的相似度，返回0-1之间的值。
+    使用与 memory_system.memory_utils 中相同的预处理和 SequenceMatcher 逻辑，保持全局一致性。
 
     Args:
         text1: 第一个文本
@@ -42,7 +50,7 @@ def calculate_similarity(text1: str, text2: str) -> float:
     Returns:
         float: 相似度值，范围0-1
     """
-    return difflib.SequenceMatcher(None, text1, text2).ratio()
+    return _calculate_similarity_common(text1, text2)
 
 
 def format_create_date(timestamp: float) -> str:

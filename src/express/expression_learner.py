@@ -27,22 +27,33 @@ def init_prompt() -> None:
     learn_style_prompt = """
 {chat_str}
 
-请从上面这段群聊中概括除了人名为"SELF"之外的人的语言风格
-1. 只考虑文字，不要考虑表情包和图片
-2. 不要涉及具体的人名，但是可以涉及具体名词
-3. 思考有没有特殊的梗，一并总结成语言风格
+请从上面这段群聊中概括除了人名为"SELF"之外的人的语言风格。
+1. 只考虑文字，不要考虑表情包和图片。
+2. 不要涉及具体的人名，但是可以涉及具体名词。
+3. 思考有没有特殊的梗，一并总结成语言风格。
 4. 例子仅供参考，请严格根据群聊内容总结!!!
-注意：总结成如下格式的规律，总结的内容要详细，但具有概括性：
-例如：当"AAAAA"时，可以"BBBBB", AAAAA代表某个具体的场景，不超过20个字。BBBBB代表对应的语言风格，特定句式或表达方式，不超过20个字。
 
-例如：
-当"对某件事表示十分惊叹"时，使用"我嘞个xxxx"
-当"表示讽刺的赞同，不讲道理"时，使用"对对对"
-当"想说明某个具体的事实观点，但懒得明说，使用"懂的都懂"
-当"当涉及游戏相关时，夸赞，略带戏谑意味"时，使用"这么强！"
+请以JSON格式输出总结结果，包含一个列表，每个元素包含 "situation" (情境) 和 "style" (风格/句式) 两个字段。
 
-请注意：不要总结你自己（SELF）的发言，尽量保证总结内容的逻辑性
-现在请你概括
+格式示例：
+[
+    {
+        "situation": "对某件事表示十分惊叹",
+        "style": "我嘞个xxxx"
+    },
+    {
+        "situation": "表示讽刺的赞同，不讲道理",
+        "style": "对对对"
+    }
+]
+
+请注意：
+1. 不要总结你自己（SELF）的发言。
+2. situation 描述不超过30个字。
+3. style 必须是提取自原文或原文的某种特定句式，不超过30个字。
+4. 直接输出JSON数组，不要包含Markdown代码块标记。
+
+现在请你概括：
 """
     Prompt(learn_style_prompt, "learn_style_prompt")
 
@@ -53,19 +64,23 @@ def init_prompt() -> None:
 **从聊天内容总结的表达方式pairs**
 {expression_pairs}
 
-请你为上面的每一条表达方式，找到该表达方式的原文句子，并输出匹配结果，expression_pair不能有重复，每个expression_pair仅输出一个最合适的context。
-如果找不到原句，就不输出该句的匹配结果。
-以json格式输出：
-格式如下：
-{{
-    "expression_pair": "表达方式pair的序号（数字）",
-    "context": "与表达方式对应的原文句子的原始内容，不要修改原文句子的内容",
-}}，
-{{
-    "expression_pair": "表达方式pair的序号（数字）",
-    "context": "与表达方式对应的原文句子的原始内容，不要修改原文句子的内容",
-}}，
-...
+请你为上面的每一条表达方式，找到该表达方式的原文句子。
+对于每个 expression_pair，请在聊天内容中找到**最匹配**的一个原文句子。
+
+请以JSON格式输出匹配结果，格式为对象列表：
+[
+    {
+        "expression_pair": 1,
+        "context": "与表达方式对应的原文句子的原始内容，不要修改原文句子的内容"
+    },
+    ...
+]
+
+注意：
+1. expression_pair 对应上面列表中的序号（数字）。
+2. context 必须完全忠实于原文。
+3. 如果找不到对应的原句，则不要输出该条目。
+4. 直接输出JSON数组。
 
 现在请你输出匹配结果：
 """
@@ -218,98 +233,59 @@ class ExpressionLearner:
 
         response, _ = await self.express_learn_model.generate_response_async(prompt, temperature=0.3)
 
-        # print(f"match_expression_context_prompt: {prompt}")
-        # print(f"{response}")
-
         # 解析JSON响应
         match_responses = []
         try:
-            response = response.strip()
-            # 检查是否已经是标准JSON数组格式
-            if response.startswith("[") and response.endswith("]"):
-                match_responses = json.loads(response)
+            # 使用repair_json处理响应，更健壮
+            repaired_content = repair_json(response)
+            if isinstance(repaired_content, list):
+                match_responses = repaired_content
+            elif isinstance(repaired_content, dict):
+                match_responses = [repaired_content]
+            elif isinstance(repaired_content, str):
+                 # 有时候repair_json可能返回json string
+                 try:
+                     parsed = json.loads(repaired_content)
+                     match_responses = parsed if isinstance(parsed, list) else [parsed]
+                 except json.JSONDecodeError:
+                     match_responses = []
             else:
-                # 尝试直接解析多个JSON对象
-                try:
-                    # 如果是多个JSON对象用逗号分隔，包装成数组
-                    if response.startswith("{") and not response.startswith("["):
-                        response = "[" + response + "]"
-                        match_responses = json.loads(response)
-                    else:
-                        # 使用repair_json处理响应
-                        repaired_content = repair_json(response)
+                match_responses = []
 
-                        # 确保repaired_content是列表格式
-                        if isinstance(repaired_content, str):
-                            try:
-                                parsed_data = json.loads(repaired_content)
-                                if isinstance(parsed_data, dict):
-                                    # 如果是字典，包装成列表
-                                    match_responses = [parsed_data]
-                                elif isinstance(parsed_data, list):
-                                    match_responses = parsed_data
-                                else:
-                                    match_responses = []
-                            except json.JSONDecodeError:
-                                match_responses = []
-                        elif isinstance(repaired_content, dict):
-                            # 如果是字典，包装成列表
-                            match_responses = [repaired_content]
-                        elif isinstance(repaired_content, list):
-                            match_responses = repaired_content
-                        else:
-                            match_responses = []
-                except json.JSONDecodeError:
-                    # 如果还是失败，尝试repair_json
-                    repaired_content = repair_json(response)
-                    if isinstance(repaired_content, str):
-                        parsed_data = json.loads(repaired_content)
-                        match_responses = parsed_data if isinstance(parsed_data, list) else [parsed_data]
-                    else:
-                        match_responses = repaired_content if isinstance(repaired_content, list) else [repaired_content]
-
-        except (json.JSONDecodeError, Exception) as e:
+        except Exception as e:
             logger.error(f"解析匹配响应JSON失败: {e}, 响应内容: \n{response}")
             return []
-
-        # 确保 match_responses 是一个列表
-        if not isinstance(match_responses, list):
-            if isinstance(match_responses, dict):
-                match_responses = [match_responses]
-            else:
-                logger.error(f"match_responses 不是列表或字典类型: {type(match_responses)}, 内容: {match_responses}")
-                return []
 
         matched_expressions = []
         used_pair_indices = set()  # 用于跟踪已经使用的expression_pair索引
 
-        logger.debug(f"match_responses 类型: {type(match_responses)}, 长度: {len(match_responses)}")
-        logger.debug(f"match_responses 内容: {match_responses}")
-
         for match_response in match_responses:
             try:
-                # 检查 match_response 的类型
                 if not isinstance(match_response, dict):
-                    logger.error(f"match_response 不是字典类型: {type(match_response)}, 内容: {match_response}")
                     continue
 
                 # 获取表达方式序号
-                if "expression_pair" not in match_response:
-                    logger.error(f"match_response 缺少 'expression_pair' 字段: {match_response}")
+                pair_val = match_response.get("expression_pair")
+                if pair_val is None:
                     continue
-
-                pair_index = int(match_response["expression_pair"]) - 1  # 转换为0-based索引
+                
+                # 兼容字符串或数字类型的序号
+                try:
+                    pair_index = int(pair_val) - 1  # 转换为0-based索引
+                except (ValueError, TypeError):
+                    continue
 
                 # 检查索引是否有效且未被使用过
                 if 0 <= pair_index < len(expression_pairs) and pair_index not in used_pair_indices:
                     situation, style = expression_pairs[pair_index]
                     context = match_response.get("context", "")
-                    matched_expressions.append((situation, style, context))
-                    used_pair_indices.add(pair_index)  # 标记该索引已使用
-                    logger.debug(f"成功匹配表达方式 {pair_index + 1}: {situation} -> {style}")
+                    if context:
+                        matched_expressions.append((situation, style, context))
+                        used_pair_indices.add(pair_index)  # 标记该索引已使用
+                        logger.debug(f"成功匹配表达方式 {pair_index + 1}: {situation} -> {style}")
                 elif pair_index in used_pair_indices:
                     logger.debug(f"跳过重复的表达方式 {pair_index + 1}")
-            except (ValueError, KeyError, IndexError, TypeError) as e:
+            except Exception as e:
                 logger.error(f"解析匹配条目失败: {e}, 条目: {match_response}")
                 continue
 
@@ -344,18 +320,16 @@ class ExpressionLearner:
             chat_str=random_msg_str,
         )
 
-        # print(f"random_msg_str:{random_msg_str}")
-        # logger.info(f"学习{type_str}的prompt: {prompt}")
-
         try:
             response, _ = await self.express_learn_model.generate_response_async(prompt, temperature=0.3)
         except Exception as e:
             logger.error(f"学习表达方式失败,模型生成出错: {e}")
             return None
+            
         expressions: List[Tuple[str, str]] = self.parse_expression_response(response)
         expressions = self._filter_self_reference_styles(expressions)
         if not expressions:
-            logger.info("过滤后没有可用的表达方式（style 与机器人名称重复）")
+            logger.info("过滤后没有可用的表达方式（style 与机器人名称重复或解析为空）")
             return None
         # logger.debug(f"学习{type_str}的response: {response}")
 
@@ -398,34 +372,36 @@ class ExpressionLearner:
 
         return filtered_with_up
 
-    def parse_expression_response(self, response: str) -> List[Tuple[str, str, str]]:
+    def parse_expression_response(self, response: str) -> List[Tuple[str, str]]:
         """
-        解析LLM返回的表达风格总结，每一行提取"当"和"使用"之间的内容，存储为(situation, style)元组
+        解析LLM返回的表达风格总结JSON
         """
-        expressions: List[Tuple[str, str, str]] = []
-        for line in response.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            # 查找"当"和下一个引号
-            idx_when = line.find('当"')
-            if idx_when == -1:
-                continue
-            idx_quote1 = idx_when + 1
-            idx_quote2 = line.find('"', idx_quote1 + 1)
-            if idx_quote2 == -1:
-                continue
-            situation = line[idx_quote1 + 1 : idx_quote2]
-            # 查找"使用"
-            idx_use = line.find('使用"', idx_quote2)
-            if idx_use == -1:
-                continue
-            idx_quote3 = idx_use + 2
-            idx_quote4 = line.find('"', idx_quote3 + 1)
-            if idx_quote4 == -1:
-                continue
-            style = line[idx_quote3 + 1 : idx_quote4]
-            expressions.append((situation, style))
+        expressions: List[Tuple[str, str]] = []
+        try:
+            repaired_content = repair_json(response)
+            data = []
+            if isinstance(repaired_content, list):
+                data = repaired_content
+            elif isinstance(repaired_content, dict):
+                data = [repaired_content]
+            elif isinstance(repaired_content, str):
+                 try:
+                     parsed = json.loads(repaired_content)
+                     data = parsed if isinstance(parsed, list) else [parsed]
+                 except json.JSONDecodeError:
+                     data = []
+            
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                situation = item.get("situation")
+                style = item.get("style")
+                if situation and style and isinstance(situation, str) and isinstance(style, str):
+                    expressions.append((situation.strip(), style.strip()))
+                    
+        except Exception as e:
+            logger.error(f"解析表达风格JSON失败: {e}, 响应: {response}")
+            
         return expressions
 
     def _filter_self_reference_styles(self, expressions: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
@@ -557,9 +533,9 @@ class ExpressionLearner:
             return None
 
         prompt = (
-            "请阅读以下多个聊天情境描述，并将它们概括成一句简短的话，"
-            "长度不超过20个字，保留共同特点：\n"
-            f"{chr(10).join(f'- {s}' for s in situations[-10:])}\n只输出概括内容。"
+            "请阅读以下多个聊天情境描述，将它们概括成一句简短的话（不超过30个字），"
+            "需要同时体现说话时的情绪氛围和说话目的，避免使用‘聊天’、‘说话’等过于笼统的词：\n"
+            f"{chr(10).join(f'- {s}' for s in situations[-10:])}\n只输出概括后的情境描述。"
         )
 
         try:

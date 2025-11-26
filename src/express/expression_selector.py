@@ -130,21 +130,27 @@ class ExpressionSelector:
             # 支持多chat_id合并抽选
             related_chat_ids = self.get_related_chat_ids(chat_id)
 
-            # 优化：一次性查询所有相关chat_id的表达方式
-            style_query = Expression.select().where((Expression.chat_id.in_(related_chat_ids)))
+            # 优化：一次性查询所有相关chat_id的表达方式，使用dicts()减少对象创建开销
+            style_query = Expression.select(
+                Expression.id,
+                Expression.situation,
+                Expression.style,
+                Expression.last_active_time,
+                Expression.chat_id,
+                Expression.create_date,
+                Expression.count
+            ).where((Expression.chat_id.in_(related_chat_ids))).dicts()
 
-            style_exprs = [
-                {
-                    "id": expr.id,
-                    "situation": expr.situation,
-                    "style": expr.style,
-                    "last_active_time": expr.last_active_time,
-                    "source_id": expr.chat_id,
-                    "create_date": expr.create_date if expr.create_date is not None else expr.last_active_time,
-                    "count": expr.count if getattr(expr, "count", None) is not None else 1,
-                }
-                for expr in style_query
-            ]
+            style_exprs = []
+            for expr in style_query:
+                # 确保字段存在且名称匹配
+                expr["source_id"] = expr["chat_id"]
+                # 处理可能为None的字段
+                if expr.get("create_date") is None:
+                     expr["create_date"] = expr.get("last_active_time")
+                if expr.get("count") is None:
+                     expr["count"] = 1
+                style_exprs.append(expr)
 
             # 随机抽样
             if style_exprs:
@@ -154,6 +160,7 @@ class ExpressionSelector:
                 selected_style = self._ensure_fresh_coverage(selected_style, style_exprs, total_num)
             else:
                 selected_style = []
+
 
             logger.info(f"随机选择，为聊天室 {chat_id} 选择了 {len(selected_style)} 个表达方式")
             return selected_style
@@ -358,15 +365,22 @@ class ExpressionSelector:
             key = (source_id, situation, style)
             if key not in updates_by_key:
                 updates_by_key[key] = expr
-        for chat_id, situation, style in updates_by_key:
-            query = Expression.select().where(
-                (Expression.chat_id == chat_id) & (Expression.situation == situation) & (Expression.style == style)
-            )
-            if query.exists():
-                expr_obj = query.get()
-                expr_obj.last_active_time = time.time()
-                expr_obj.save()
-                logger.debug("表达方式激活: 更新last_active_time in db")
+        
+        try:
+            # 使用事务批量处理
+            with Expression._meta.database.atomic():
+                current_time_val = time.time()
+                for chat_id, situation, style in updates_by_key:
+                    query = Expression.select().where(
+                        (Expression.chat_id == chat_id) & (Expression.situation == situation) & (Expression.style == style)
+                    )
+                    if query.exists():
+                        expr_obj = query.get()
+                        expr_obj.last_active_time = current_time_val
+                        expr_obj.save()
+                logger.debug(f"表达方式激活: 批量更新了 {len(updates_by_key)} 条记录的last_active_time")
+        except Exception as e:
+            logger.error(f"批量更新表达方式时间失败: {e}")
 
 
 init_prompt()
