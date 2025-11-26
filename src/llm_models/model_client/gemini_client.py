@@ -297,6 +297,7 @@ async def _default_stream_response_handler(
     _usage_record = None  # 使用情况记录
     last_resp: GenerateContentResponse | None = None  # 保存最后一个 chunk
     resp = APIResponse()
+    last_usage_metadata = None
 
     def _insure_buffer_closed():
         if _fc_delta_buffer and not _fc_delta_buffer.closed:
@@ -322,6 +323,17 @@ async def _default_stream_response_handler(
                 chunk.usage_metadata.prompt_token_count or 0,
                 (chunk.usage_metadata.candidates_token_count or 0) + (chunk.usage_metadata.thoughts_token_count or 0),
                 chunk.usage_metadata.total_token_count or 0,
+            )
+            last_usage_metadata = chunk.usage_metadata
+
+    if last_usage_metadata is not None:
+        cached_tokens = getattr(last_usage_metadata, "cached_content_token_count", 0) or 0
+        if cached_tokens > 0:
+            logger.info(
+                "Gemini 上下文缓存命中（流式），cached_content_token_count=%s (prompt=%s, total=%s)",
+                cached_tokens,
+                getattr(last_usage_metadata, "prompt_token_count", None),
+                getattr(last_usage_metadata, "total_token_count", None),
             )
 
     try:
@@ -384,6 +396,14 @@ def _default_normal_response_parser(
             (usage_metadata.candidates_token_count or 0) + (usage_metadata.thoughts_token_count or 0),
             usage_metadata.total_token_count or 0,
         )
+        cached_tokens = getattr(usage_metadata, "cached_content_token_count", 0) or 0
+        if cached_tokens > 0:
+            logger.info(
+                "Gemini 上下文缓存命中，cached_content_token_count=%s (prompt=%s, total=%s)",
+                cached_tokens,
+                usage_metadata.prompt_token_count or 0,
+                usage_metadata.total_token_count or 0,
+            )
     else:
         _usage_record = None
 
