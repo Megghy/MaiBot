@@ -35,6 +35,7 @@ def init_prompt():
     Prompt(
         """{name_block}
 你的兴趣是: {interest}
+
 **Action Selection Requirements**
 {plan_style}
 {moderation_prompt}""",
@@ -44,6 +45,7 @@ def init_prompt():
     SHARED_USER_PROMPT = """
 {time_block}
 {chat_context_description}, 以下是具体的聊天内容
+
 **Chat Content**
 {chat_content_block}
 
@@ -57,9 +59,7 @@ def init_prompt():
 不要默认消息是发给你的, 只有当你确信需要回应时才行动.
 
 **Available Actions**:
-请参考 Tool Definitions 中的工具列表.
-
-请使用 Tool Calls 来执行 actions.
+请参考 Tool Definitions 中的工具列表, 使用 Tool Calls 来执行 actions.
 """,
         "planner_user_prompt",
     )
@@ -676,15 +676,18 @@ class ActionPlanner:
         if reasoning:
             parts.append(reasoning.strip())
 
-        # 优先使用消息 ID 引用目标消息，避免在 reason 中重复整段原文
-        if target_message_id:
-            parts.append(f"目标消息: [{target_message_id}]")
-        elif target_message and (target_message.processed_plain_text or target_message.display_message):
-            content = target_message.processed_plain_text or target_message.display_message or ""
-            content = content.strip()
-            if content:
-                excerpt = content[:80] + ("..." if len(content) > 80 else "")
-                parts.append(f"目标消息: {excerpt}")
+        # 在 reason 的基础上补充目标消息的可读摘要
+        msg_content: Optional[str] = None
+        if target_message and (target_message.processed_plain_text or target_message.display_message):
+            msg_content = (target_message.processed_plain_text or target_message.display_message or "").strip()
+
+        if msg_content:
+            # 为了可读性，仍然做轻度截断，避免极长消息撑爆日志
+            excerpt = msg_content[:80] + ("..." if len(msg_content) > 80 else "")
+            parts.append(f"目标消息: {excerpt}")
+        elif target_message_id:
+            # 只有在拿不到消息内容时才退回到 ID
+            parts.append(f"目标消息ID: [{target_message_id}] (内容未找到)")
 
         if action_data:
             kv_pairs = [f"{k}={v}" for k, v in action_data.items() if v not in (None, "")]
