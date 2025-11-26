@@ -164,7 +164,7 @@ class ActionPlanner:
             "description": "回复一条消息. 当你想回应用户或聊天上下文时使用此项.",
             "parameters": [
                 ("target_message_id", ToolParamType.STRING, "你回复的消息的ID (m+数字)", True, None),
-                ("reason", ToolParamType.STRING, "回复的原因, 用简短的语句说明", True, None)
+                ("reason", ToolParamType.STRING, "回复的原因和预期方式/角度, 用尽可能简短明确的语句说明", True, None)
             ]
         })
         
@@ -173,7 +173,7 @@ class ActionPlanner:
             "name": "no_reply",
             "description": "不回复. 当你想保持沉默时使用此项.",
             "parameters": [
-                ("reason", ToolParamType.STRING, "不回复的原因, 用简短的语句说明", True, None)
+                ("reason", ToolParamType.STRING, "不回复的原因, 用尽可能简短的语句说明", True, None)
             ]
         })
 
