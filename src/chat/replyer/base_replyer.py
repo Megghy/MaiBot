@@ -283,6 +283,7 @@ class BaseReplyer:
                 if system_prompt:
                     logger.info(f"\nSystem Prompt:{system_prompt}\n")
             else:
+                logger.debug(f'replyer_System_prompt:{system_prompt}\n')
                 logger.debug(f"\nreplyer_Prompt:{prompt}\n")
 
             # 定义拒绝回复工具

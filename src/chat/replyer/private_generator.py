@@ -53,9 +53,11 @@ class PrivateReplyer(BaseReplyer):
         sender = "用户"
         target = "消息"
 
+        target_person: Optional[Person] = None
         if reply_message:
             user_id = reply_message.user_info.user_id
             person = Person(platform=platform, user_id=user_id)
+            target_person = person
             person_name = person.person_name or user_id
             sender = person_name
             target = reply_message.processed_plain_text
@@ -159,6 +161,9 @@ class PrivateReplyer(BaseReplyer):
             text_part=text_part,
         )
 
+        # 为当前回复目标构建记忆提示块（私聊不区分群级记忆）
+        person_memory_block = build_person_memory_block(target_person)
+
         # 获取匹配的额外prompt
         chat_prompt_content = self._get_chat_prompt_by_type(chat_id, "private")
         chat_prompt_block = f"{chat_prompt_content}\n" if chat_prompt_content else ""
@@ -192,6 +197,7 @@ class PrivateReplyer(BaseReplyer):
                 moderation_prompt=moderation_prompt_block,
                 memory_retrieval=memory_retrieval,
                 chat_prompt=chat_prompt_block,
+                person_memory_block=person_memory_block,
             )
         else:
             user_prompt = await global_prompt_manager.format_prompt(
@@ -210,6 +216,7 @@ class PrivateReplyer(BaseReplyer):
                 sender_name=sender,
                 memory_retrieval=memory_retrieval,
                 chat_prompt=chat_prompt_block,
+                person_memory_block=person_memory_block,
             )
 
         return user_prompt, system_prompt, selected_expressions
