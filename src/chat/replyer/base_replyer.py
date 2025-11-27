@@ -300,7 +300,7 @@ class BaseReplyer:
             if allow_refuse:
                 refuse_tool = {
                     "name": "refuse_to_reply",
-                    "description": "仅在以下极端情况下才调用此工具: 用户内容明显违法违规、存在严重人身攻击/辱骂，或内容完全无法理解(例如乱码)。不要仅因为内容重复、无聊或你主观上不想回复就调用此工具。当上文中的 Planner 已经决定要进行回复时，除非出现这些极端情况，否则不要调用此工具。",
+                    "description": "仅在以下极端情况下才调用此工具. 或者语境完全不支持进行回复.",
                     "parameters": [("reason", ToolParamType.STRING, "拒绝回复的原因", True, None)],
                 }
                 tools = [refuse_tool]
