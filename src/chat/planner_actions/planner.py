@@ -860,8 +860,17 @@ class ActionPlanner:
         if not action_type:
             raise ValueError("无法从 JSON 中推断 action type")
 
+        # 兼容形如 {"name": "no_reply", "arguments": {...}} 或 {"no_reply": {...}} 的结构，提取实际参数
+        parsed_args = action_data
+        if isinstance(action_data.get("arguments"), dict):
+            parsed_args = dict(action_data["arguments"])
+        else:
+            inner = action_data.get(action_type)
+            if isinstance(inner, dict):
+                parsed_args = dict(inner)
+
         # 使用與模型返回一致的 ToolCall 封裝格式
-        fake_tool_call = ToolCall(call_id="fake_json_call", func_name=action_type, args=action_data)
+        fake_tool_call = ToolCall(call_id="fake_json_call", func_name=action_type, args=parsed_args)
         return self._parse_single_tool_call(
             fake_tool_call, message_id_list, list(filtered_actions.items()), reasoning_text
         )
