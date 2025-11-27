@@ -104,6 +104,7 @@ class BaseReplyer:
         stream_id: Optional[str] = None,
         reply_message: Optional[DatabaseMessages] = None,
         reply_time_point: Optional[float] = None,
+        reasoning_config: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, LLMGenerationDataModel]:
         # sourcery skip: merge-nested-ifs
         """
@@ -168,6 +169,9 @@ class BaseReplyer:
             content = None
             reasoning_content = None
             model_name = "unknown_model"
+            if not prompt:
+                logger.error("Prompt 构建失败，无法生成回复。")
+                return False, llm_response
 
             try:
                 allow_refuse = True
@@ -177,7 +181,7 @@ class BaseReplyer:
                     )
 
                 content, reasoning_content, model_name, tool_call = await self.llm_generate_content(
-                    prompt, system_prompt=system_prompt, allow_refuse=allow_refuse
+                    prompt, system_prompt=system_prompt, allow_refuse=allow_refuse, reasoning_config=reasoning_config
                 )
 
                 logger.info(f"replyer生成内容: {content}")
@@ -276,6 +280,7 @@ class BaseReplyer:
         prompt: str,
         system_prompt: Optional[str] = None,
         allow_refuse: bool = True,
+        reasoning_config: Optional[Dict[str, Any]] = None,
     ):
         with Timer("LLM生成", {}):
             if global_config.debug.show_replyer_prompt:
@@ -301,7 +306,7 @@ class BaseReplyer:
                 tools = [refuse_tool]
 
             content, (reasoning_content, model_name, tool_calls) = await self.express_model.generate_response_async(
-                prompt, tools=tools, system_prompt=system_prompt
+                prompt, tools=tools, system_prompt=system_prompt, reasoning_config=reasoning_config
             )
 
             # 检查是否拒绝回复

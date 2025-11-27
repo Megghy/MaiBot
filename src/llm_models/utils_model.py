@@ -119,6 +119,7 @@ class LLMRequest:
         tools: Optional[List[Dict[str, Any]]] = None,
         system_prompt: Optional[str] = None,
         raise_when_empty: bool = True,
+        reasoning_config: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, Tuple[str, str, Optional[List[ToolCall]]]]:
         """
         异步生成响应
@@ -156,12 +157,25 @@ class LLMRequest:
 
         tool_built = self._build_tool_options(tools)
 
+        extra_params_override: Optional[Dict[str, Any]] = None
+        if reasoning_config:
+            mapped: Dict[str, Any] = {}
+            if "enabled" in reasoning_config:
+                mapped["thinking_enabled"] = reasoning_config["enabled"]
+            if "level" in reasoning_config:
+                mapped["thinking_level"] = reasoning_config["level"]
+            if "budget" in reasoning_config:
+                mapped["thinking_budget"] = reasoning_config["budget"]
+            if mapped:
+                extra_params_override = mapped
+
         response, model_info = await self._execute_request(
             request_type=RequestType.RESPONSE,
             message_factory=message_factory,
             temperature=temperature,
             max_tokens=max_tokens,
             tool_options=tool_built,
+            extra_params=extra_params_override,
         )
 
         logger.debug(f"LLM请求总耗时: {time.time() - start_time}")
@@ -191,6 +205,7 @@ class LLMRequest:
         max_tokens: Optional[int] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         raise_when_empty: bool = True,
+        reasoning_config: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, Tuple[str, str, Optional[List[ToolCall]]]]:
         """
         异步生成响应
@@ -296,6 +311,7 @@ class LLMRequest:
         max_tokens: Optional[int],
         embedding_input: str | None,
         audio_base64: str | None,
+        extra_params: Optional[Dict[str, Any]] = None,
     ) -> APIResponse:
         """
         在单个模型上执行请求，包含针对临时错误的重试逻辑。
@@ -306,6 +322,14 @@ class LLMRequest:
 
         while retry_remain > 0:
             try:
+                merged_extra_params: Optional[Dict[str, Any]] = None
+                if isinstance(model_info.extra_params, dict):
+                    merged_extra_params = dict(model_info.extra_params)
+                else:
+                    merged_extra_params = {}
+                if extra_params:
+                    merged_extra_params.update(extra_params)
+
                 if request_type == RequestType.RESPONSE:
                     return await client.get_response(
                         model_info=model_info,
@@ -316,21 +340,21 @@ class LLMRequest:
                         response_format=response_format,
                         stream_response_handler=stream_response_handler,
                         async_response_parser=async_response_parser,
-                        extra_params=model_info.extra_params,
+                        extra_params=merged_extra_params,
                     )
                 elif request_type == RequestType.EMBEDDING:
                     assert embedding_input is not None, "嵌入输入不能为空"
                     return await client.get_embedding(
                         model_info=model_info,
                         embedding_input=embedding_input,
-                        extra_params=model_info.extra_params,
+                        extra_params=merged_extra_params,
                     )
                 elif request_type == RequestType.AUDIO:
                     assert audio_base64 is not None, "音频Base64不能为空"
                     return await client.get_audio_transcriptions(
                         model_info=model_info,
                         audio_base64=audio_base64,
-                        extra_params=model_info.extra_params,
+                        extra_params=merged_extra_params,
                     )
             except EmptyResponseException as e:
                 # 空回复：通常为临时问题，单独记录并重试
@@ -397,6 +421,7 @@ class LLMRequest:
         max_tokens: Optional[int] = None,
         embedding_input: str | None = None,
         audio_base64: str | None = None,
+        extra_params: Optional[Dict[str, Any]] = None,
     ) -> Tuple[APIResponse, ModelInfo]:
         """
         调度器函数，负责模型选择、故障切换。
@@ -427,6 +452,7 @@ class LLMRequest:
                     max_tokens=max_tokens,
                     embedding_input=embedding_input,
                     audio_base64=audio_base64,
+                    extra_params=extra_params,
                 )
                 total_tokens, penalty, usage_penalty = self.model_usage[model_info.name]
                 if response_usage := response.usage:
