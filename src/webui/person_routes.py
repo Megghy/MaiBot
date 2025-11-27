@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Header, Query
 from pydantic import BaseModel
 from typing import Optional, List, Dict
 from src.common.logger import get_logger
-from src.common.database.database_model import PersonInfo
+from src.common.database.database_model import PersonInfo, PersonGroupMemory
 from .token_manager import get_token_manager
 import json
 import time
@@ -31,6 +31,14 @@ class PersonInfoResponse(BaseModel):
     know_times: Optional[float]
     know_since: Optional[float]
     last_know: Optional[float]
+    group_memory_points: Optional[List["GroupMemoryPointsResponse"]] = None
+
+
+class GroupMemoryPointsResponse(BaseModel):
+    """群级记忆响应"""
+
+    group_id: str
+    memory_points: Optional[str]
 
 
 class PersonListResponse(BaseModel):
@@ -115,8 +123,23 @@ def parse_group_nick_name(group_nick_name_str: Optional[str]) -> Optional[List[D
         return None
 
 
-def person_to_response(person: PersonInfo) -> PersonInfoResponse:
+def person_to_response(person: PersonInfo, include_group_memory: bool = False) -> PersonInfoResponse:
     """将 PersonInfo 模型转换为响应对象"""
+    group_memory_points: Optional[List[GroupMemoryPointsResponse]] = None
+
+    if include_group_memory:
+        try:
+            records = PersonGroupMemory.select().where(PersonGroupMemory.person_id == person.person_id)
+            group_memory_points_list: List[GroupMemoryPointsResponse] = []
+            for record in records:
+                group_memory_points_list.append(
+                    GroupMemoryPointsResponse(group_id=record.group_id, memory_points=record.memory_points)
+                )
+            if group_memory_points_list:
+                group_memory_points = group_memory_points_list
+        except Exception as e:
+            logger.warning(f"加载人物 {person.person_id} 的群级记忆失败: {e}")
+
     return PersonInfoResponse(
         id=person.id,
         is_known=person.is_known,
@@ -131,6 +154,7 @@ def person_to_response(person: PersonInfo) -> PersonInfoResponse:
         know_times=person.know_times,
         know_since=person.know_since,
         last_know=person.last_know,
+        group_memory_points=group_memory_points,
     )
 
 
@@ -224,7 +248,8 @@ async def get_person_detail(person_id: str, authorization: Optional[str] = Heade
         if not person:
             raise HTTPException(status_code=404, detail=f"未找到 ID 为 {person_id} 的人物信息")
 
-        return PersonDetailResponse(success=True, data=person_to_response(person))
+        # 详情接口包含群级记忆
+        return PersonDetailResponse(success=True, data=person_to_response(person, include_group_memory=True))
 
     except HTTPException:
         raise
