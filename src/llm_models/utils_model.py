@@ -83,9 +83,8 @@ class LLMRequest:
         content = response.content or ""
         reasoning_content = response.reasoning_content or ""
         tool_calls = response.tool_calls
-        if not reasoning_content and content:
-            content, extracted_reasoning = self._extract_reasoning(content)
-            reasoning_content = extracted_reasoning
+        # 统一从 content 中剥离 <think> 思考内容，并合并到 reasoning_content
+        content, reasoning_content = self._clean_reasoning_from_content(content, reasoning_content)
         if usage := response.usage:
             llm_usage_recorder.record_usage_to_database(
                 model_info=model_info,
@@ -181,12 +180,11 @@ class LLMRequest:
         logger.debug(f"LLM请求总耗时: {time.time() - start_time}")
         logger.debug(f"LLM生成内容: {response}")
 
-        content = response.content
+        content = response.content or ""
         reasoning_content = response.reasoning_content or ""
         tool_calls = response.tool_calls
-        if not reasoning_content and content:
-            content, extracted_reasoning = self._extract_reasoning(content)
-            reasoning_content = extracted_reasoning
+        # 统一从 content 中剥离 <think> 思考内容，并合并到 reasoning_content
+        content, reasoning_content = self._clean_reasoning_from_content(content, reasoning_content)
         if usage := response.usage:
             llm_usage_recorder.record_usage_to_database(
                 model_info=model_info,
@@ -233,12 +231,11 @@ class LLMRequest:
         logger.debug(f"LLM请求总耗时: {time.time() - start_time}")
         logger.debug(f"LLM生成内容: {response}")
 
-        content = response.content
+        content = response.content or ""
         reasoning_content = response.reasoning_content or ""
         tool_calls = response.tool_calls
-        if not reasoning_content and content:
-            content, extracted_reasoning = self._extract_reasoning(content)
-            reasoning_content = extracted_reasoning
+        # 统一从 content 中剥离 <think> 思考内容，并合并到 reasoning_content
+        content, reasoning_content = self._clean_reasoning_from_content(content, reasoning_content)
         if usage := response.usage:
             llm_usage_recorder.record_usage_to_database(
                 model_info=model_info,
@@ -520,3 +517,24 @@ class LLMRequest:
         content = re.sub(r"(?:<think>)?.*?</think>", "", content, flags=re.DOTALL, count=1).strip()
         reasoning = match[1].strip() if match else ""
         return content, reasoning
+
+    @staticmethod
+    def _clean_reasoning_from_content(content: str, reasoning_content: str) -> Tuple[str, str]:
+        """统一从 content 中剥离 <think> 思考内容, 并与已有 reasoning_content 合并"""
+        if not content:
+            return content, reasoning_content or ""
+
+        # 仅在出现 <think> 标记时才尝试解析, 避免影响普通模型输出
+        if "<think>" not in content and "</think>" not in content:
+            return content, reasoning_content or ""
+
+        cleaned_content, extracted_reasoning = LLMRequest._extract_reasoning(content)
+        if extracted_reasoning:
+            if reasoning_content:
+                # 避免重复拼接完全相同的思考内容
+                if extracted_reasoning not in reasoning_content:
+                    reasoning_content = (reasoning_content.rstrip() + "\n" + extracted_reasoning).strip()
+            else:
+                reasoning_content = extracted_reasoning
+
+        return cleaned_content, (reasoning_content or "")
