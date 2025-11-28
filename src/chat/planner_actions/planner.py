@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 logger = get_logger("planner")
 MAX_DYNAMIC_ACTION_TOOLS = 6
+RECENT_REPLY_WINDOW_SECONDS = 600
 
 install(extra_lines=3)
 
@@ -44,6 +45,7 @@ def init_prompt():
 
     SHARED_USER_PROMPT = """
 {time_block}
+{reply_stats_block}
 {chat_context_description}, 以下是具体的聊天内容
 
 **Chat Content**
@@ -520,6 +522,48 @@ class ActionPlanner:
 
         return False
 
+    def _format_time_delta(self, seconds: float) -> str:
+        seconds_int = int(max(0, seconds))
+        if seconds_int < 60:
+            return f"{seconds_int}秒"
+        minutes, sec = divmod(seconds_int, 60)
+        if minutes < 60:
+            if sec == 0:
+                return f"{minutes}分钟"
+            return f"{minutes}分钟{sec}秒"
+        hours, minutes = divmod(minutes, 60)
+        if hours < 24:
+            if minutes == 0:
+                return f"{hours}小时"
+            return f"{hours}小时{minutes}分钟"
+        days, hours = divmod(hours, 24)
+        if hours == 0:
+            return f"{days}天"
+        return f"{days}天{hours}小时"
+
+    def _build_reply_stats_block(self) -> str:
+        now = time.time()
+        window = RECENT_REPLY_WINDOW_SECONDS
+        reply_timestamps: List[float] = []
+
+        for _reasoning, timestamp, content in self.plan_log:
+            # 只统计最近一段时间内的记录
+            if now - timestamp > window:
+                continue
+            if isinstance(content, list) and all(isinstance(action, ActionPlannerInfo) for action in content):
+                if any(action.action_type == "reply" for action in content):
+                    reply_timestamps.append(timestamp)
+
+        minutes = max(1, int(window // 60) or 1)
+
+        if not reply_timestamps:
+            return f"在最近{minutes}分钟内，你还没有回复过消息，可以根据对话内容谨慎选择是否发言。"
+
+        count = len(reply_timestamps)
+        last_delta = now - max(reply_timestamps)
+        delta_text = self._format_time_delta(last_delta)
+        return f"在最近{minutes}分钟内，你已经回复了{count}条消息，距离你上一次回复已经过去了{delta_text}。"
+
     async def build_planner_prompt(
         self,
         is_group_chat: bool,
@@ -543,6 +587,7 @@ class ActionPlanner:
                 f",也有人叫你{','.join(global_config.bot.alias_names)}" if global_config.bot.alias_names else ""
             )
             name_block = f"你的名字是{bot_name}{bot_nickname}，请注意哪些是你自己的发言。"
+            reply_stats_block = self._build_reply_stats_block()
 
             # 构建系统提示词
             system_prompt = await global_prompt_manager.format_prompt(
@@ -564,6 +609,7 @@ class ActionPlanner:
             prompt = await global_prompt_manager.format_prompt(
                 prompt_name,
                 time_block=time_block,
+                reply_stats_block=reply_stats_block,
                 chat_context_description=chat_context_description,
                 chat_content_block=chat_content_block,
             )
@@ -777,6 +823,10 @@ class ActionPlanner:
                 fallback_actions = self._try_parse_json_fallback(
                     llm_content, filtered_actions, message_id_list, reasoning_text
                 )
+                if not fallback_actions:
+                    fallback_actions = self._try_parse_tagged_tool_fallback(
+                        llm_content, filtered_actions, message_id_list, reasoning_text
+                    )
                 if fallback_actions:
                     actions.extend(fallback_actions)
                 else:
@@ -814,6 +864,82 @@ class ActionPlanner:
                 available_actions=available_actions,
             )
         ]
+
+    def _try_parse_tagged_tool_fallback(
+        self,
+        llm_content: str,
+        filtered_actions: Dict[str, ActionInfo],
+        message_id_list: List[Tuple[str, "DatabaseMessages"]],
+        reasoning_text: str,
+    ) -> Optional[List[ActionPlannerInfo]]:
+        """尝试从 LLM 输出中解析 <arg_key>/<arg_value> 格式的工具调用（回退机制）"""
+        if not llm_content:
+            return None
+
+        text = llm_content.strip()
+        if not text:
+            return None
+
+        # 先粗略检查是否包含 <arg_key>/<arg_value> 结构, 没有就直接返回
+        if "<arg_key>" not in text or "</arg_key>" not in text:
+            return None
+
+        # 识别可能的 action 名称
+        internal_action_names = ["no_reply", "reply", "wait_time", "no_reply_until_call"]
+        candidate_actions = internal_action_names + list(filtered_actions.keys())
+        action_type: Optional[str] = None
+
+        # 1) 兼容 `no_reply\n<arg_key>...` 的老格式，优先使用首行
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if lines:
+            first_line = lines[0]
+            if first_line in candidate_actions:
+                action_type = first_line
+
+        # 2) 兼容 `<name>no_reply</name>` / `<action>no_reply</action>` / `<action_type>no_reply</action_type>` 格式
+        if action_type is None:
+            name_match = re.search(r"<(name|action|action_type)>\s*([A-Za-z0-9_]+)\s*</\\1>", text)
+            if name_match:
+                maybe_name = name_match.group(2).strip()
+                if maybe_name in candidate_actions:
+                    action_type = maybe_name
+
+        # 3) 兼容有 <tool_call> 等包裹的情况：在全文中寻找第一个合法 action 名称
+        if action_type is None:
+            earliest_pos: Optional[int] = None
+            for candidate in candidate_actions:
+                match = re.search(rf"\b{re.escape(candidate)}\b", text)
+                if match:
+                    pos = match.start()
+                    if earliest_pos is None or pos < earliest_pos:
+                        earliest_pos = pos
+                        action_type = candidate
+
+        if action_type is None:
+            return None
+
+        pattern = r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>"
+        matches = re.findall(pattern, text, re.DOTALL)
+        if not matches:
+            return None
+
+        args: Dict[str, Any] = {}
+        for raw_key, raw_value in matches:
+            key = raw_key.strip()
+            if not key:
+                continue
+            args[key] = raw_value.strip()
+
+        if not args:
+            return None
+
+        fake_tool_call = ToolCall(call_id="tagged_fallback_1", func_name=action_type, args=args)
+        logger.info(
+            f"{self.log_prefix}检测到 <arg_key>/<arg_value> 格式的工具调用回退: {action_type}，参数: {list(args.keys())}"
+        )
+        return self._parse_single_tool_call(
+            fake_tool_call, message_id_list, list(filtered_actions.items()), reasoning_text
+        )
 
     def _try_parse_json_fallback(
         self,
