@@ -180,6 +180,12 @@ class BaseReplyer:
                         getattr(action, "action_type", "") == "reply" for action in chosen_actions
                     )
 
+                if reply_message and (
+                    getattr(reply_message, "is_mentioned", False)
+                    or getattr(reply_message, "is_at", False)
+                ):
+                    allow_refuse = False
+
                 content, reasoning_content, model_name, tool_call = await self.llm_generate_content(
                     prompt, system_prompt=system_prompt, allow_refuse=allow_refuse, reasoning_config=reasoning_config
                 )
@@ -300,7 +306,7 @@ class BaseReplyer:
             if allow_refuse:
                 refuse_tool = {
                     "name": "refuse_to_reply",
-                    "description": "仅在以下极端情况下才调用此工具. 或者语境完全不支持进行回复.",
+                    "description": "仅在以下极端情况下才调用此工具. ",
                     "parameters": [("reason", ToolParamType.STRING, "拒绝回复的原因", True, None)],
                 }
                 tools = [refuse_tool]
