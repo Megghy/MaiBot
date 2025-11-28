@@ -327,6 +327,25 @@ class LLMRequest:
                 if extra_params:
                     merged_extra_params.update(extra_params)
 
+                # 将任务级别的 penalty 配置下传给底层 Client
+                if request_type == RequestType.RESPONSE:
+                    try:
+                        if "frequency_penalty" not in merged_extra_params:  # type: ignore[operator]
+                            merged_extra_params["frequency_penalty"] = getattr(  # type: ignore[index]
+                                self.model_for_task,
+                                "frequency_penalty",
+                                0.0,
+                            )
+                        if "presence_penalty" not in merged_extra_params:  # type: ignore[operator]
+                            merged_extra_params["presence_penalty"] = getattr(  # type: ignore[index]
+                                self.model_for_task,
+                                "presence_penalty",
+                                0.0,
+                            )
+                    except Exception:
+                        # 防御性处理，避免因为老配置或字段缺失导致报错
+                        pass
+
                 if request_type == RequestType.RESPONSE:
                     return await client.get_response(
                         model_info=model_info,

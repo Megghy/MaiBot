@@ -88,6 +88,10 @@ class TaskConfig(ConfigBase):
     temperature: float = 0.3
     """模型温度"""
 
+    frequency_penalty: float = 0.0
+
+    presence_penalty: float = 0.0
+
 
 @dataclass
 class ModelTaskConfig(ConfigBase):
