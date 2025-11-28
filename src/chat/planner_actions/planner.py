@@ -94,6 +94,7 @@ class ActionPlanner:
 
         self.plan_log: List[Tuple[str, float, Union[List[ActionPlannerInfo], str]]] = []
         self._allow_no_reply_until_call = False
+        self._allow_reply_action = True
 
     def find_message_by_id(
         self, message_id: str, message_id_list: List[Tuple[str, "DatabaseMessages"]]
@@ -154,21 +155,25 @@ class ActionPlanner:
         return re.sub(pattern, _replace, text)
 
     def _convert_actions_to_tools(
-        self, actions: Dict[str, ActionInfo], include_no_reply_until_call: bool = False
+        self,
+        actions: Dict[str, ActionInfo],
+        include_no_reply_until_call: bool = False,
+        include_reply: bool = True,
     ) -> List[Dict[str, Any]]:
         """Convert actions to tool definitions"""
         tools = []
         
         # Add standard actions
         # reply
-        tools.append({
-            "name": "reply",
-            "description": "回复一条消息. 当你想回应用户或聊天上下文时使用此项.",
-            "parameters": [
-                ("target_message_id", ToolParamType.STRING, "你回复的消息的ID (m+数字)", True, None),
-                ("reason", ToolParamType.STRING, "回复的原因和预期方式/角度, 用尽可能简短明确的语句说明", True, None)
-            ]
-        })
+        if include_reply:
+            tools.append({
+                "name": "reply",
+                "description": "回复一条消息. 当你想回应用户或聊天上下文时使用此项.",
+                "parameters": [
+                    ("target_message_id", ToolParamType.STRING, "你回复的消息的ID (m+数字)", True, None),
+                    ("reason", ToolParamType.STRING, "回复的原因和预期方式/角度, 用尽可能简短明确的语句说明", True, None)
+                ]
+            })
         
         # no_reply
         tools.append({
@@ -601,9 +606,11 @@ class ActionPlanner:
             # 根据是否是提及时选择不同的模板
             if is_mentioned:
                 self._allow_no_reply_until_call = False
+                self._allow_reply_action = False
                 prompt_name = "planner_mentioned_user_prompt"
             else:
                 self._allow_no_reply_until_call = self._has_consecutive_no_reply(min_count=3)
+                self._allow_reply_action = True
                 prompt_name = "planner_user_prompt"
 
             prompt = await global_prompt_manager.format_prompt(
@@ -761,7 +768,9 @@ class ActionPlanner:
         try:
             # Build tools from filtered actions
             tools = self._convert_actions_to_tools(
-                filtered_actions, include_no_reply_until_call=self._allow_no_reply_until_call
+                filtered_actions,
+                include_no_reply_until_call=self._allow_no_reply_until_call,
+                include_reply=self._allow_reply_action,
             )
 
             # 调用LLM
