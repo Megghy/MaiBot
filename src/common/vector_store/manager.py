@@ -65,6 +65,16 @@ class VectorStoreManager:
         ids = await self.store.add([text], vector, [metadata])
         return ids[0] if ids else ""
 
+    async def add_emoji(self, text: str, metadata: Dict[str, Any]) -> str:
+        """添加表情向量"""
+        vector = await self.get_embedding(text)
+        meta = metadata.copy()
+        meta["type"] = "emoji"
+        if "emoji_hash" in meta and "id" not in meta:
+            meta["id"] = meta["emoji_hash"]
+        ids = await self.store.add([text], vector, [meta])
+        return ids[0] if ids else ""
+
     async def search_memory(self, query: str, k: int = 5, filter_fn: Optional[Callable] = None, include_relation: bool = True) -> List[Dict[str, Any]]:
         """搜索记忆（默认同时搜索 memory 和 relation 类型）"""
         vector = await self.get_embedding(query)
@@ -80,6 +90,19 @@ class VectorStoreManager:
                 return filter_fn(meta)
             return True
             
+        return await self.store.search(vector, k, combined_filter)
+
+    async def search_emoji(self, query: str, k: int = 5, filter_fn: Optional[Callable] = None) -> List[Dict[str, Any]]:
+        """搜索表情向量"""
+        vector = await self.get_embedding(query)
+
+        def combined_filter(meta):
+            if meta.get("type") != "emoji":
+                return False
+            if filter_fn:
+                return filter_fn(meta)
+            return True
+
         return await self.store.search(vector, k, combined_filter)
 
     async def search_jargon(self, query: str, k: int = 5, filter_fn: Optional[Callable] = None) -> List[Dict[str, Any]]:

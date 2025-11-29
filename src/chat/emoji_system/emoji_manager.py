@@ -16,6 +16,7 @@ from rich.traceback import install
 from src.common.database.database_model import Emoji, Images, ImageDescriptions
 from src.common.database.database import db as peewee_db
 from src.common.logger import get_logger
+from src.common.vector_store.manager import vector_manager
 from src.config.config import global_config, model_config
 from src.chat.utils.utils_image import image_path_to_base64, get_image_manager, _decode_image_bytes_and_hash
 from src.llm_models.utils_model import LLMRequest
@@ -415,6 +416,32 @@ class EmojiManager:
         except Exception as e:
             logger.error(f"记录表情使用失败: {str(e)}")
 
+    def _build_emoji_text_for_embedding(self, emoji: "MaiEmoji") -> str:
+        parts: List[str] = []
+        if emoji.description:
+            parts.append(emoji.description)
+        if emoji.emotion:
+            parts.append("情绪标签:" + ",".join(emoji.emotion))
+        if not parts:
+            return emoji.filename
+        return " ".join(parts)
+
+    async def _upsert_emoji_vector(self, emoji: "MaiEmoji") -> None:
+        try:
+            if not emoji.hash:
+                return
+            text = self._build_emoji_text_for_embedding(emoji)
+            if not text:
+                return
+            metadata = {
+                "emoji_hash": emoji.hash,
+                "description": emoji.description,
+                "emotions": emoji.emotion,
+            }
+            await vector_manager.add_emoji(text, metadata)
+        except Exception as e:
+            logger.error(f"更新表情向量失败: {str(e)}")
+
     async def get_emoji_for_text(self, text_emotion: str) -> Optional[Tuple[str, str, str]]:
         """根据文本内容获取相关表情包
         Args:
@@ -425,6 +452,37 @@ class EmojiManager:
         try:
             self._ensure_db()
             _time_start = time.time()
+
+            try:
+                vector_results = await vector_manager.search_emoji(text_emotion, k=10)
+            except Exception as e:
+                logger.error(f"[错误] 通过向量检索表情包失败: {str(e)}")
+                vector_results = []
+
+            if vector_results:
+                vector_candidates = []
+                for item in vector_results:
+                    emoji_hash = item.get("emoji_hash") or item.get("id")
+                    if not emoji_hash:
+                        continue
+                    emoji = await self.get_emoji_from_manager(str(emoji_hash))
+                    if not emoji or emoji.is_deleted:
+                        continue
+                    emotions = emoji.emotion
+                    matched_emotion = emotions[0] if emotions else "表情"
+                    similarity = float(item.get("similarity", 0.0))
+                    vector_candidates.append((emoji, similarity, matched_emotion))
+
+                if vector_candidates:
+                    vector_candidates.sort(key=lambda x: x[1], reverse=True)
+                    top_candidates = vector_candidates[: min(3, len(vector_candidates))]
+                    selected_emoji, similarity, matched_emotion = random.choice(top_candidates)
+                    self.record_usage(selected_emoji.hash)
+                    _time_end = time.time()
+                    logger.info(
+                        f"为[{text_emotion}]找到表情包(向量): {matched_emotion} ({selected_emoji.filename}), Similarity: {similarity:.4f}"
+                    )
+                    return selected_emoji.full_path, f"[ {selected_emoji.description} ]", matched_emotion
 
             # 获取所有表情包 (从内存缓存中获取)
             all_emojis = self.emoji_objects
@@ -584,6 +642,10 @@ class EmojiManager:
     async def start_periodic_check_register(self) -> None:
         """定期检查表情包完整性和数量"""
         await self.get_all_emoji_from_db()
+        try:
+            await self.build_all_emoji_vectors()
+        except Exception as e:
+            logger.error(f"[错误] 启动时构建表情向量失败: {str(e)}")
         while True:
             # logger.info("[扫描] 开始检查表情包完整性...")
             await self.check_emoji_file_integrity()
@@ -657,6 +719,23 @@ class EmojiManager:
             logger.error(f"[错误] 从数据库加载所有表情包对象失败: {str(e)}")
             self.emoji_objects = []  # 加载失败则清空列表
             self.emoji_num = 0
+
+    async def build_all_emoji_vectors(self) -> None:
+        try:
+            self._ensure_db()
+            if not self.emoji_objects:
+                await self.get_all_emoji_from_db()
+
+            count = 0
+            for emoji in self.emoji_objects:
+                if emoji.is_deleted:
+                    continue
+                await self._upsert_emoji_vector(emoji)
+                count += 1
+
+            logger.info(f"[向量初始化] 已为 {count} 个表情包构建向量")
+        except Exception as e:
+            logger.error(f"[错误] 构建表情向量失败: {str(e)}")
 
     async def get_emoji_from_db(self, emoji_hash: Optional[str] = None) -> List["MaiEmoji"]:
         """获取指定哈希值的表情包并初始化为MaiEmoji类对象列表 (主要用于调试或特定查找)
@@ -796,6 +875,10 @@ class EmojiManager:
                 self.emoji_objects = [e for e in self.emoji_objects if e.hash != emoji_hash]
                 # 更新计数
                 self.emoji_num -= 1
+                try:
+                    await vector_manager.delete([emoji_hash])
+                except Exception as e:
+                    logger.error(f"删除表情向量失败: {str(e)}")
                 logger.info(f"[统计] 当前表情包数量: {self.emoji_num}")
 
                 return True
@@ -876,6 +959,7 @@ class EmojiManager:
                         if register_success:
                             self.emoji_objects.append(new_emoji)
                             self.emoji_num += 1
+                            await self._upsert_emoji_vector(new_emoji)
                             logger.info(f"[成功] 注册: {new_emoji.filename}")
                             return True
                         else:
@@ -1080,6 +1164,7 @@ class EmojiManager:
                     # 注册成功后，添加到内存列表
                     self.emoji_objects.append(new_emoji)
                     self.emoji_num += 1
+                    await self._upsert_emoji_vector(new_emoji)
                     logger.info(f"[成功] 注册新表情包: {filename} (当前: {self.emoji_num}/{self.emoji_num_max})")
                     return True
                 else:
