@@ -1,17 +1,21 @@
 """
 系统控制路由
 
-提供系统重启、状态查询等功能
+提供系统重启、关闭、状态查询等功能
 """
 
-import os
-import sys
 import time
 from datetime import datetime
-from fastapi import APIRouter, HTTPException
+from typing import Optional
+
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 from pydantic import BaseModel
+
 from src.config.config import MMC_VERSION
 from src.config.runtime_reload import hot_reload_all_configs
+from src.webui.token_manager import get_token_manager
+
+from src.runtime.lifecycle import request_restart, request_shutdown
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -26,6 +30,13 @@ class RestartResponse(BaseModel):
     message: str
 
 
+class ShutdownResponse(BaseModel):
+    """关闭响应"""
+
+    success: bool
+    message: str
+
+
 class StatusResponse(BaseModel):
     """状态响应"""
 
@@ -35,30 +46,52 @@ class StatusResponse(BaseModel):
     start_time: str
 
 
+def verify_auth_token(authorization: Optional[str]) -> None:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="未提供有效的认证信息")
+
+    token = authorization.replace("Bearer ", "")
+    token_manager = get_token_manager()
+    if not token_manager.verify_token(token):
+        raise HTTPException(status_code=401, detail="Token 无效或已过期")
+
+
+async def _request_lifecycle_after_response(action: str) -> None:
+    request_ok = request_restart() if action == "restart" else request_shutdown()
+    if not request_ok:
+        print(f"[{datetime.now()}] 生命周期请求已存在，忽略重复请求: {action}")
+
+
 @router.post("/restart", response_model=RestartResponse)
-async def restart_maibot():
+async def restart_maibot(background_tasks: BackgroundTasks, authorization: Optional[str] = Header(None)):
     """
     重启麦麦主程序
 
-    使用 os.execv 重启当前进程，配置更改将在重启后生效。
-    注意：此操作会使麦麦暂时离线。
+    请求主进程优雅关闭后由 launcher 自动重新拉起。
     """
     try:
-        # 记录重启操作
-        print(f"[{datetime.now()}] WebUI 触发重启操作")
-
-        # 使用 os.execv 重启当前进程
-        # 这会替换当前进程，保持相同的 PID
-        python = sys.executable
-        args = [python] + sys.argv
-
-        # 返回成功响应（实际上这个响应可能不会发送，因为进程会立即重启）
-        # 但我们仍然返回它以保持 API 一致性
-        os.execv(python, args)
-
+        verify_auth_token(authorization)
+        background_tasks.add_task(_request_lifecycle_after_response, "restart")
         return RestartResponse(success=True, message="麦麦正在重启中...")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"重启失败: {str(e)}") from e
+
+
+@router.post("/shutdown", response_model=ShutdownResponse)
+async def shutdown_maibot(background_tasks: BackgroundTasks, authorization: Optional[str] = Header(None)):
+    """
+    请求主进程优雅关闭。
+    """
+    try:
+        verify_auth_token(authorization)
+        background_tasks.add_task(_request_lifecycle_after_response, "shutdown")
+        return ShutdownResponse(success=True, message="麦麦正在关闭中...")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"关闭失败: {str(e)}") from e
 
 
 @router.get("/status", response_model=StatusResponse)

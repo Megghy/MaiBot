@@ -44,7 +44,15 @@ from src.chat.replyer.prompt.lpmm_prompt import init_lpmm_prompt
 from src.chat.replyer.prompt.replyer_prompt import init_replyer_prompt
 from src.chat.replyer.prompt.rewrite_prompt import init_rewrite_prompt
 from src.memory_system.memory_retrieval import init_memory_retrieval_prompt
-from src.runtime.agent import AgentMode, AgentProfile, AgentRequest, AgentRunner, ContextAssembler
+from src.runtime.agent import (
+    AgentRequest,
+    AgentRunner,
+    AssembledContext,
+    ContextAssembler,
+    PromptBlock,
+    PromptComposer,
+    build_agent_profile,
+)
 
 # 初始化 Prompt
 init_lpmm_prompt()
@@ -137,6 +145,7 @@ class BaseReplyer:
 
         prompt = None
         system_prompt = None
+        prompt_blocks: list[PromptBlock] = []
         selected_expressions: Optional[List[int]] = None
         llm_response = LLMGenerationDataModel()
         if available_actions is None:
@@ -144,7 +153,7 @@ class BaseReplyer:
         try:
             # 3. 构建 Prompt
             with Timer("构建Prompt", {}):
-                prompt, system_prompt, selected_expressions = await self.build_prompt_reply_context(
+                assembled_context, selected_expressions = await self.build_prompt_reply_context(
                     extra_info=extra_info,
                     available_actions=available_actions,
                     chosen_actions=chosen_actions,
@@ -153,6 +162,12 @@ class BaseReplyer:
                     reply_reason=reply_reason,
                     reply_time_point=reply_time_point,
                 )
+            prompt_profile = build_agent_profile("reply_default")
+            prepared_prompt = PromptComposer().prepare(list(assembled_context.blocks), prompt_profile)
+            prompt_blocks = prepared_prompt.blocks
+            composed_prompt = PromptComposer().compose(prompt_blocks)
+            prompt = composed_prompt.user_prompt
+            system_prompt = composed_prompt.system_prompt
             llm_response.prompt = prompt
             if system_prompt:
                 # 将system_prompt也记录到prompt中，以便于插件和日志查看
@@ -174,6 +189,10 @@ class BaseReplyer:
                 if modified_message and modified_message._modify_flags.modify_llm_prompt:
                     llm_response.prompt = modified_message.llm_prompt
                     prompt = str(modified_message.llm_prompt)
+                    prompt_blocks = ContextAssembler().from_parts(
+                        system_parts={"policy": system_prompt or ""},
+                        user_parts={"task": prompt},
+                    ).blocks
 
             # 4. 调用 LLM 生成回复
             content = None
@@ -194,7 +213,9 @@ class BaseReplyer:
                     allow_refuse = False
 
                 content, reasoning_content, model_name, tool_call = await self.llm_generate_content(
-                    prompt, system_prompt=system_prompt, allow_refuse=allow_refuse, reasoning_config=reasoning_config
+                    prompt_blocks,
+                    allow_refuse=allow_refuse,
+                    reasoning_config=reasoning_config,
                 )
 
                 logger.info(f"replyer生成内容: {content}")
@@ -290,12 +311,26 @@ class BaseReplyer:
 
     async def llm_generate_content(
         self,
-        prompt: str,
+        prompt_or_blocks: List[PromptBlock] | str,
         system_prompt: Optional[str] = None,
         allow_refuse: bool = True,
         reasoning_config: Optional[Dict[str, Any]] = None,
     ):
         with Timer("LLM生成", {}):
+            if isinstance(prompt_or_blocks, str):
+                prompt_blocks = ContextAssembler().from_parts(
+                    system_parts={"policy": system_prompt or ""},
+                    user_parts={"task": prompt_or_blocks},
+                ).blocks
+            else:
+                prompt_blocks = list(prompt_or_blocks)
+
+            prompt_profile = build_agent_profile("reply_default")
+            prepared_prompt = PromptComposer().prepare(prompt_blocks, prompt_profile)
+            prompt_blocks = prepared_prompt.blocks
+            composed_prompt = PromptComposer().compose(prompt_blocks)
+            prompt = composed_prompt.user_prompt
+            system_prompt = composed_prompt.system_prompt
             if global_config.debug.show_replyer_prompt:
                 logger.info(f"\n{prompt}\n")
                 if system_prompt:
@@ -316,11 +351,6 @@ class BaseReplyer:
                     "parameters": [("reason", ToolParamType.STRING, "拒绝回复的原因", True, None)],
                 }
                 tools = [refuse_tool]
-
-            assembled = ContextAssembler().from_parts(
-                system_parts={"policy": system_prompt or ""},
-                user_parts={"context": prompt},
-            )
             agent_result = await AgentRunner().run(
                 AgentRequest(
                     request_id=f"reply:{self.chat_stream.stream_id}:{int(time.time() * 1000)}",
@@ -328,18 +358,13 @@ class BaseReplyer:
                     user_id=None,
                     message=prompt,
                     skill_name="reply_default",
-                    prompt_blocks=assembled.blocks,
+                    prompt_blocks=prompt_blocks,
                     metadata={
                         "tool_definitions": tools,
                         "reasoning_config": reasoning_config,
                     },
                 ),
-                AgentProfile(
-                    name="reply_default",
-                    skill_name="reply_default",
-                    agent_mode=AgentMode.SINGLE_PASS,
-                    model_task="replyer",
-                ),
+                prompt_profile,
                 llm_request=self.express_model,
                 chat_stream=self.chat_stream,
             )
@@ -389,7 +414,7 @@ class BaseReplyer:
         enable_tool: bool = True,
         reply_message: Optional[DatabaseMessages] = None,
         reply_time_point: Optional[float] = None,
-    ) -> Tuple[str, str, List[int]]:
+    ) -> Tuple[AssembledContext, List[int]]:
         """构建回复器上下文 (抽象方法)"""
         raise NotImplementedError
 
@@ -478,10 +503,10 @@ class BaseReplyer:
 
         planner_reasoning = ""
         if global_config.chat.include_planner_reasoning and reply_reason:
-            planner_reasoning = f"你的想法是：{reply_reason}"
+            planner_reasoning = " ".join(str(reply_reason).split())
 
         extra_info_block = (
-            f"以下是你在回复时需要参考的信息，现在请你阅读以下内容，进行决策\n{extra_info}\n以上是你在回复时需要参考的信息，现在请你阅读以下内容，进行决策"
+            f"补充参考信息:\n{extra_info}"
             if extra_info
             else ""
         )

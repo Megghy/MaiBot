@@ -443,7 +443,7 @@ class EmojiManager:
             }
             await vector_manager.add_emoji(text, metadata)
         except Exception as e:
-            logger.error(f"更新表情向量失败: {str(e)}")
+            logger.error(f"更新表情向量失败 ({emoji.filename}, hash={emoji.hash}): {e!r}")
 
     async def get_emoji_for_text(self, text_emotion: str) -> Optional[Tuple[str, str, str]]:
         """根据文本内容获取相关表情包

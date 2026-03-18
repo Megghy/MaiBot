@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import uuid
+from hashlib import sha1
 from typing import Any
 
 from src.common.logger import get_logger
@@ -64,7 +65,8 @@ class AgentRunner:
         plugin_config: dict[str, Any] | None = None,
     ) -> AgentResult:
         blocks = request.prompt_blocks or [PromptBlock(name="context", content=request.message)]
-        composed = self.prompt_composer.compose(blocks)
+        prepared_blocks = self.prompt_composer.prepare(blocks, profile)
+        composed = self.prompt_composer.compose(prepared_blocks.blocks)
         result = AgentResult(
             status=AgentStatus.NO_RESULT,
             used_skill=profile.skill_name,
@@ -79,6 +81,13 @@ class AgentRunner:
                     "user_blocks": len(
                         [block for block in composed.ordered_blocks if block.role == PromptBlockRole.USER]
                     ),
+                    "block_names": [block.name for block in composed.ordered_blocks],
+                    "block_char_counts": {block.name: len(block.content) for block in composed.ordered_blocks},
+                    "dropped_blocks": list(prepared_blocks.dropped_blocks),
+                    "injected_blocks": list(prepared_blocks.injected_blocks),
+                    "prompt_hash": sha1(
+                        f"{composed.system_prompt}\n---\n{composed.user_prompt}".encode("utf-8")
+                    ).hexdigest()[:12],
                 }
             ],
         )
@@ -197,9 +206,13 @@ class AgentRunner:
                 if isinstance(factory_result, dict):
                     prompt_blocks = factory_result.get("prompt_blocks") or request.prompt_blocks
                     if prompt_blocks:
-                        composed = self.prompt_composer.compose(prompt_blocks)
+                        prepared_blocks = self.prompt_composer.prepare(prompt_blocks, profile)
+                        composed = self.prompt_composer.compose(prepared_blocks.blocks)
                         system_prompt = composed.system_prompt
                         user_prompt = composed.user_prompt
+                        loop_state["last_prompt_blocks"] = [block.name for block in composed.ordered_blocks]
+                        loop_state["last_dropped_blocks"] = list(prepared_blocks.dropped_blocks)
+                        loop_state["last_injected_blocks"] = list(prepared_blocks.injected_blocks)
                     tool_definitions = factory_result.get("tool_definitions") or base_tool_definitions
                 result.system_prompt = system_prompt
                 result.user_prompt = user_prompt
@@ -228,6 +241,9 @@ class AgentRunner:
                 "reasoning": reasoning or "",
                 "actions": [],
                 "observations": [],
+                "block_names": list(loop_state.get("last_prompt_blocks", [])),
+                "dropped_blocks": list(loop_state.get("last_dropped_blocks", [])),
+                "injected_blocks": list(loop_state.get("last_injected_blocks", [])),
             }
             result.trace.append(iteration_record)
 

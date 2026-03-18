@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
 import os
+import subprocess
+import sys
 import time
 import platform
 import traceback
@@ -56,6 +58,9 @@ uvicorn_server = None
 driver = None
 app = None
 loop = None
+
+WORKER_FLAG = "--worker"
+RESTART_EXIT_CODE = 23
 
 
 def easter_egg():
@@ -222,49 +227,113 @@ def raw_main():
     return MainSystem()
 
 
-if __name__ == "__main__":
-    exit_code = 0  # 用于记录程序最终的退出状态
+def _build_worker_command() -> list[str]:
+    worker_args = [arg for arg in sys.argv[1:] if arg != WORKER_FLAG]
+    return [sys.executable, os.path.abspath(__file__), WORKER_FLAG, *worker_args]
+
+
+def _wait_for_worker_exit(process: subprocess.Popen) -> int:
     try:
-        # 获取MainSystem实例
+        return process.wait()
+    except KeyboardInterrupt:
+        logger.warning("Launcher 收到中断信号，等待 worker 优雅退出...")
+        try:
+            return process.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            logger.warning("Worker 长时间未退出，尝试终止进程...")
+            process.terminate()
+            try:
+                return process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                logger.error("Worker 终止超时，强制结束进程")
+                process.kill()
+                return process.wait()
+
+
+def launcher_main() -> int:
+    worker_command = _build_worker_command()
+    logger.info(f"Launcher 已启动，worker 命令: {' '.join(worker_command)}")
+
+    while True:
+        process = subprocess.Popen(worker_command, cwd=script_dir)
+        exit_code = _wait_for_worker_exit(process)
+
+        if exit_code == RESTART_EXIT_CODE:
+            logger.info("检测到重启请求，正在重新拉起 worker...")
+            continue
+
+        return exit_code
+
+
+def worker_main() -> int:
+    exit_code = 0
+    worker_loop = None
+
+    from src.runtime.lifecycle import LifecycleAction, wait_for_request, consume_requested_action, reset_lifecycle_state
+
+    try:
+        reset_lifecycle_state()
         main_system = raw_main()
 
-        # 创建事件循环
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        worker_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(worker_loop)
 
-        # 初始化 WebSocket 日志推送
         from src.common.logger import initialize_ws_handler
 
-        initialize_ws_handler(loop)
+        initialize_ws_handler(worker_loop)
 
         try:
-            # 执行初始化和任务调度
-            loop.run_until_complete(main_system.initialize())
-            # Schedule tasks returns a future that runs forever.
-            # We can run console_input_loop concurrently.
-            main_tasks = loop.create_task(main_system.schedule_tasks())
-            loop.run_until_complete(main_tasks)
+            worker_loop.run_until_complete(main_system.initialize())
+
+            main_tasks = worker_loop.create_task(main_system.schedule_tasks())
+            lifecycle_task = worker_loop.create_task(wait_for_request())
+
+            done, _ = worker_loop.run_until_complete(
+                asyncio.wait({main_tasks, lifecycle_task}, return_when=asyncio.FIRST_COMPLETED)
+            )
+
+            if lifecycle_task in done:
+                requested_action = consume_requested_action()
+                logger.info(f"收到生命周期请求: {requested_action}，开始优雅关闭")
+
+                if not main_tasks.done():
+                    main_tasks.cancel()
+                worker_loop.run_until_complete(asyncio.gather(main_tasks, return_exceptions=True))
+                worker_loop.run_until_complete(graceful_shutdown())
+
+                exit_code = RESTART_EXIT_CODE if requested_action == LifecycleAction.RESTART else 0
+            else:
+                lifecycle_task.cancel()
+                worker_loop.run_until_complete(asyncio.gather(lifecycle_task, return_exceptions=True))
+
+                try:
+                    main_tasks.result()
+                    logger.warning("主服务任务意外结束")
+                except asyncio.CancelledError:
+                    logger.warning("主服务任务被取消")
+                except Exception as task_error:
+                    logger.error(f"主服务任务异常退出: {task_error}")
+
+                worker_loop.run_until_complete(graceful_shutdown())
+                exit_code = 1
 
         except KeyboardInterrupt:
-            # loop.run_until_complete(get_global_api().stop())
             logger.warning("收到中断信号，正在优雅关闭...")
-            if loop and not loop.is_closed():
+            if worker_loop and not worker_loop.is_closed():
                 try:
-                    loop.run_until_complete(graceful_shutdown())
-                except Exception as ge:  # 捕捉优雅关闭时可能发生的错误
+                    worker_loop.run_until_complete(graceful_shutdown())
+                except Exception as ge:
                     logger.error(f"优雅关闭时发生错误: {ge}")
-        # 新增：检测外部请求关闭
+            exit_code = 0
 
     except Exception as e:
         logger.error(f"主程序发生异常: {str(e)} {str(traceback.format_exc())}")
-        exit_code = 1  # 标记发生错误
+        exit_code = 1
     finally:
-        # 确保 loop 在任何情况下都尝试关闭（如果存在且未关闭）
-        if "loop" in locals() and loop and not loop.is_closed():
-            loop.close()
+        if worker_loop and not worker_loop.is_closed():
+            worker_loop.close()
             print("[主程序] 事件循环已关闭")
 
-        # 关闭日志系统，释放文件句柄
         try:
             shutdown_logging()
         except Exception as e:
@@ -272,6 +341,11 @@ if __name__ == "__main__":
 
         print("[主程序] 准备退出...")
 
-        # 使用 os._exit() 强制退出，避免被阻塞
-        # 由于已经在 graceful_shutdown() 中完成了所有清理工作，这是安全的
-        os._exit(exit_code)
+    return exit_code
+
+
+if __name__ == "__main__":
+    if WORKER_FLAG in sys.argv[1:]:
+        os._exit(worker_main())
+
+    os._exit(launcher_main())

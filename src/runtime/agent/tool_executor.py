@@ -4,7 +4,6 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.chat.message_receive.chat_stream import get_chat_manager
-from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
 from src.common.logger import get_logger
 from src.config.config import global_config, model_config
 from src.llm_models.payload_content import ToolCall
@@ -12,29 +11,77 @@ from src.llm_models.utils_model import LLMRequest
 from src.plugin_system.apis.tool_api import get_llm_available_tool_definitions, get_tool_instance
 from src.plugin_system.base.base_tool import BaseTool
 from src.plugin_system.base.component_types import ComponentType
-from src.runtime.agent import AgentMode, AgentProfile, AgentRequest, AgentRunner, PromptBlock, PromptBlockRole
+from src.runtime.agent import AgentRequest, AgentRunner, ContextAssembler, PromptComposer, build_agent_profile
 from src.runtime.local_component_state import local_component_state
 
 logger = get_logger("agent_tool_executor")
 
 
 def init_tool_executor_prompt() -> None:
-    Prompt(
-        """
-你是一个专门执行工具的助手。你的名字是{bot_name}。现在是{time_now}。
-群里正在进行的聊天内容：
-{chat_history}
+    return None
 
-现在，{sender}发送了内容:{target_message},你想要回复ta。
-请仔细分析聊天内容，考虑以下几点：
-1. 内容中是否包含需要查询信息的问题
-2. 是否有明确的工具使用指令
-你可以选择多个动作
 
-If you need to use tools, please directly call the corresponding tool function. If you do not need to use any tool, simply output "No tool needed".
-""",
-        "tool_executor_prompt",
+def _join_non_empty(*parts: str) -> str:
+    normalized_parts = [part.strip() for part in parts if part and part.strip()]
+    return "\n\n".join(normalized_parts)
+
+
+def _build_tool_executor_policy() -> str:
+    return "\n".join(
+        [
+            "你负责判断当前消息是否需要调用工具辅助回复。",
+            "你不是最终回复生成器，不要输出聊天回复内容。",
+            "只需要判断是否调用工具，以及应该调用哪些工具。",
+        ]
     )
+
+
+def _build_tool_executor_identity() -> str:
+    return "\n".join(
+        [
+            f"你的名字是{global_config.bot.nickname}。",
+            f"当前时间：{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}",
+        ]
+    )
+
+
+def _build_tool_executor_chat_history(chat_history: str) -> str:
+    return _join_non_empty("聊天记录:", chat_history)
+
+
+def _build_tool_executor_reply_target(sender: str, target_message: str) -> str:
+    return f"{sender} 刚刚发送的内容是: {target_message}"
+
+
+def _build_tool_executor_task() -> str:
+    return "\n".join(
+        [
+            "任务:",
+            "1. 判断消息里是否包含需要查询、检索、计算或调用外部能力的信息需求。",
+            "2. 判断消息里是否有明确的工具使用指令。",
+            "3. 如果需要工具，可以选择多个工具调用。",
+            '4. 如果不需要任何工具，只输出 "No tool needed"。',
+        ]
+    )
+
+
+def _build_tool_executor_prompt_blocks(
+    *,
+    target_message: str,
+    chat_history: str,
+    sender: str,
+):
+    return ContextAssembler().from_parts(
+        system_parts={
+            "policy": _build_tool_executor_policy(),
+            "identity": _build_tool_executor_identity(),
+        },
+        user_parts={
+            "chat_history": _build_tool_executor_chat_history(chat_history),
+            "reply_target": _build_tool_executor_reply_target(sender, target_message),
+            "task": _build_tool_executor_task(),
+        },
+    ).blocks
 
 
 init_tool_executor_prompt()
@@ -64,14 +111,17 @@ class AgentToolExecutor:
         if not tools:
             return [], [], ""
 
-        prompt = await global_prompt_manager.format_prompt(
-            "tool_executor_prompt",
-            target_message=target_message,
-            chat_history=chat_history,
-            sender=sender,
-            bot_name=global_config.bot.nickname,
-            time_now=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        profile = build_agent_profile("tool_only")
+        prepared_prompt = PromptComposer().prepare(
+            _build_tool_executor_prompt_blocks(
+                target_message=target_message,
+                chat_history=chat_history,
+                sender=sender,
+            ),
+            profile,
         )
+        composed_prompt = PromptComposer().compose(prepared_prompt.blocks)
+        prompt = composed_prompt.user_prompt
         agent_result = await AgentRunner().run(
             AgentRequest(
                 request_id=f"tool-executor:{self.chat_id}:{int(time.time() * 1000)}",
@@ -79,17 +129,10 @@ class AgentToolExecutor:
                 user_id=None,
                 message=target_message,
                 skill_name="tool_only",
-                prompt_blocks=[
-                    PromptBlock(name="task", content=prompt, role=PromptBlockRole.USER),
-                ],
+                prompt_blocks=prepared_prompt.blocks,
                 metadata={"tool_definitions": tools},
             ),
-            AgentProfile(
-                name="tool_only",
-                skill_name="tool_only",
-                agent_mode=AgentMode.SINGLE_PASS,
-                model_task="tool_use",
-            ),
+            profile,
             llm_request=self.llm_model,
         )
         tool_calls = [ToolCall(record.call_id, record.tool_name, record.args) for record in agent_result.tool_calls]

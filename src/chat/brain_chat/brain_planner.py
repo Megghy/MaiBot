@@ -22,12 +22,12 @@ from src.chat.utils.chat_message_builder import (
     build_readable_actions,
     get_actions_by_timestamp_with_chat,
 )
-from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
 from src.common.data_models.info_data_model import ActionPlannerInfo
 from src.common.logger import get_logger
 from src.config.config import global_config, model_config
 from src.llm_models.utils_model import LLMRequest
 from src.plugin_system.base.component_types import ActionInfo
+from src.runtime.agent import ContextAssembler, PromptBlock, PromptComposer, build_agent_profile
 
 if TYPE_CHECKING:
     from src.common.data_models.database_data_model import DatabaseMessages
@@ -39,29 +39,56 @@ install(extra_lines=3)
 
 
 def init_prompt() -> None:
-    Prompt(
-        """
-{time_block}
-{name_block}
-你的兴趣是: {interest}
-{chat_context_description}, 以下是具体的聊天内容
-**聊天内容**
-{chat_content_block}
+    return None
 
-**Action Records**
-{actions_before_now_block}
 
-请选择一个合适的 action.
-首先, 思考你的选择理由, 然后使用 tool calls 来执行 action.
-**Action Selection Requirements**
-请根据聊天内容, 用户的最新消息和以下标准选择合适的 action:
-{plan_style}
-{moderation_prompt}
+def _join_non_empty(*parts: str) -> str:
+    normalized_parts = [part.strip() for part in parts if part and part.strip()]
+    return "\n\n".join(normalized_parts)
 
-⚠️ 只允许通过 Tool Calls 返回你的决定, 请勿输出 JSON、自然语言总结或其他自由文本。
-如果不需要执行任何动作, 请调用 `no_reply` 工具并说明原因。
-""",
-        "brain_planner_prompt",
+
+def _build_brain_planner_policy_block() -> str:
+    return _join_non_empty(
+        "请不要输出违法违规内容，不要输出色情、暴力、政治相关内容，如有敏感内容请规避。",
+        global_config.personality.private_plan_style,
+    )
+
+
+def _build_brain_planner_identity_block(interest: str) -> str:
+    bot_name = global_config.bot.nickname
+    bot_nickname = f"，也可以叫你{','.join(global_config.bot.alias_names)}" if global_config.bot.alias_names else ""
+    return "\n".join(
+        [
+            f"你的名字是{bot_name}{bot_nickname}。",
+            "你正在负责为当前聊天选择下一步动作。",
+            "请注意区分哪些发言是你自己的发言。",
+            f"你的兴趣是: {interest}",
+        ]
+    )
+
+
+def _build_brain_planner_state_block(
+    *,
+    time_block: str,
+    chat_context_description: str,
+    actions_before_now_block: str,
+) -> str:
+    return _join_non_empty(
+        time_block,
+        chat_context_description,
+        actions_before_now_block,
+    )
+
+
+def _build_brain_planner_task_block() -> str:
+    return "\n".join(
+        [
+            "任务清单:",
+            "1. 阅读最新聊天记录，判断当前是否需要行动。",
+            "2. 结合最近已经执行过的 action，避免重复操作。",
+            "3. 只允许通过 tool calls 表达决定，不要输出 JSON、自然语言总结或其他自由文本。",
+            "4. 如果不需要执行任何动作，请调用 `no_reply` 工具并说明原因。",
+        ]
     )
 
 
@@ -97,7 +124,7 @@ class BrainPlanner:
         )
         logger.debug(f"{self.log_prefix}过滤后有{len(filtered_actions)}个可用动作")
 
-        prompt, message_id_list = await self.build_planner_prompt(
+        prompt_blocks, prompt, message_id_list = await self.build_planner_prompt(
             is_group_chat=is_group_chat,
             chat_target_info=chat_target_info,
             current_available_actions=filtered_actions,
@@ -109,6 +136,7 @@ class BrainPlanner:
             prompt=prompt,
             message_id_list=message_id_list,
             filtered_actions=filtered_actions,
+            prompt_blocks=prompt_blocks,
         )
 
     async def execute_prepared_plan(
@@ -124,6 +152,7 @@ class BrainPlanner:
             filtered_actions=prepared_plan.filtered_actions,
             available_actions=available_actions,
             loop_start_time=loop_start_time,
+            prompt_blocks=prepared_plan.prompt_blocks,
         )
 
     async def build_planner_prompt(
@@ -134,7 +163,7 @@ class BrainPlanner:
         message_id_list: List[Tuple[str, "DatabaseMessages"]],
         chat_content_block: str = "",
         interest: str = "",
-    ) -> tuple[str, List[Tuple[str, "DatabaseMessages"]]]:
+    ) -> tuple[List[PromptBlock], str, List[Tuple[str, "DatabaseMessages"]]]:
         del is_group_chat, current_available_actions
 
         try:
@@ -156,30 +185,30 @@ class BrainPlanner:
                     f"你正在和 {chat_target_info.person_name or chat_target_info.user_nickname or '对方'} 聊天中"
                 )
 
-            moderation_prompt_block = "请不要输出违法违规内容，不要输出色情，暴力，政治相关内容，如有敏感内容，请规避。"
             time_block = f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            bot_name = global_config.bot.nickname
-            bot_nickname = (
-                f",也可以叫你{','.join(global_config.bot.alias_names)}" if global_config.bot.alias_names else ""
+            assembled = ContextAssembler().from_parts(
+                system_parts={
+                    "policy": _build_brain_planner_policy_block(),
+                    "identity": _build_brain_planner_identity_block(interest),
+                },
+                user_parts={
+                    "state": _build_brain_planner_state_block(
+                        time_block=time_block,
+                        chat_context_description=chat_context_description,
+                        actions_before_now_block=actions_before_now_block,
+                    ),
+                    "chat_history": chat_content_block,
+                    "task": _build_brain_planner_task_block(),
+                },
             )
-            name_block = f"你的名字是{bot_name}{bot_nickname}，请注意哪些是你自己的发言。"
-
-            planner_prompt_template = await global_prompt_manager.get_prompt_async("brain_planner_prompt")
-            prompt = planner_prompt_template.format(
-                time_block=time_block,
-                chat_context_description=chat_context_description,
-                chat_content_block=chat_content_block,
-                actions_before_now_block=actions_before_now_block,
-                moderation_prompt=moderation_prompt_block,
-                name_block=name_block,
-                interest=interest,
-                plan_style=global_config.personality.private_plan_style,
-            )
-            return prompt, message_id_list
+            planner_profile = build_agent_profile("planner_default")
+            prepared_prompt = PromptComposer().prepare(assembled.blocks, planner_profile)
+            composed = PromptComposer().compose(prepared_prompt.blocks)
+            return prepared_prompt.blocks, composed.user_prompt, message_id_list
         except Exception as exc:
             logger.error(f"构建 Planner 提示词时出错: {exc}")
             logger.error(traceback.format_exc())
-            return "构建 Planner Prompt 时出错", []
+            return [], "构建 Planner Prompt 时出错", []
 
     def get_necessary_info(self) -> Tuple[bool, Optional["TargetPersonInfo"], Dict[str, ActionInfo]]:
         return resolve_necessary_info(
@@ -195,6 +224,7 @@ class BrainPlanner:
         filtered_actions: Dict[str, ActionInfo],
         available_actions: Dict[str, ActionInfo],
         loop_start_time: float,
+        prompt_blocks: Optional[List[PromptBlock]] = None,
     ) -> List[ActionPlannerInfo]:
         _reasoning, actions = await execute_planner_llm(
             self.planner_llm,
@@ -202,6 +232,7 @@ class BrainPlanner:
                 prompt=prompt,
                 message_id_list=message_id_list,
                 filtered_actions=filtered_actions,
+                prompt_blocks=prompt_blocks or [],
             ),
             available_actions=available_actions,
             loop_start_time=loop_start_time,

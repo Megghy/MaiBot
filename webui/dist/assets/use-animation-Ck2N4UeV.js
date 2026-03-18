@@ -1,0 +1,1 @@
+import{r as o}from"./router-DJHQVhae.js";import{q as n}from"./index-DlEotRWz.js";const e=()=>{const t=o.useContext(n);if(t===void 0)throw new Error("useAnimation must be used within an AnimationProvider");return t};export{e as u};

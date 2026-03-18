@@ -49,6 +49,7 @@ async def test_reply_llm_generate_content_routes_through_agent_runner(monkeypatc
     assert request.prompt_blocks[0].content == "System prompt"
     assert request.prompt_blocks[1].role == PromptBlockRole.USER
     assert request.prompt_blocks[1].content == "User prompt"
+    assert any(block.name == "output_contract" for block in request.prompt_blocks)
 
     profile = seen["profile"]
     assert profile.name == "reply_default"

@@ -3,62 +3,78 @@ import traceback
 from datetime import datetime
 from typing import List, Tuple, Union
 
-from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
 from src.common.data_models.info_data_model import ActionPlannerInfo
 from src.common.logger import get_logger
 from src.config.config import global_config
+from src.runtime.agent import ContextAssembler, PromptComposer, PromptBlock, build_agent_profile
 
 logger = get_logger("planner")
 
 
 def init_prompt() -> None:
-    Prompt(
-        """{name_block}
-你的兴趣是: {interest}
+    return None
 
-**Action Selection Requirements**
-{plan_style}
-{moderation_prompt}""",
-        "planner_system_prompt",
+
+def _join_non_empty(*parts: str) -> str:
+    normalized_parts = [part.strip() for part in parts if part and part.strip()]
+    return "\n\n".join(normalized_parts)
+
+
+def _build_planner_policy_block(plan_style: str) -> str:
+    return _join_non_empty(
+        "请不要输出违法违规内容，不要输出色情、暴力、政治相关内容，如有敏感内容请规避。",
+        plan_style,
     )
 
-    shared_user_prompt = """
-{time_block}
-{reply_stats_block}
-{chat_context_description}, 以下是具体的聊天内容
 
-**Chat Content**
-{chat_content_block}
-
-请选择一个合适的 action.
-"""
-
-    Prompt(
-        shared_user_prompt
-        + """
-**Critial Instruction**: 
-在调用工具前, 你必须先在心中回答: **"最新这条消息是发给谁的?"** (参考 Context 中的对话流向). 
-不要默认消息是发给你的, 只有当你确信需要回应时才行动.
-
-**Available Actions**:
-请参考 Tool Definitions 中的工具列表, 使用 Tool Calls 来执行 actions.
-""",
-        "planner_user_prompt",
+def _build_planner_identity_block(interest: str) -> str:
+    bot_name = global_config.bot.nickname
+    bot_nickname = f"，也有人叫你{','.join(global_config.bot.alias_names)}" if global_config.bot.alias_names else ""
+    return "\n".join(
+        [
+            f"你的名字是{bot_name}{bot_nickname}。",
+            "你正在负责为当前聊天选择下一步动作。",
+            "请注意区分哪些发言是你自己说的。",
+            f"你的兴趣是: {interest}",
+        ]
     )
 
-    Prompt(
-        shared_user_prompt
-        + """
-首先, 思考你的选择理由, 然后使用 tool calls 来执行 action.
-**Action Selection Requirements**
-请根据聊天内容, 用户的最新消息和以下标准选择合适的 action:
-1. 思考**所有**的可用的 action 中的**每个动作**是否符合当下条件, 如果动作使用条件符合聊天内容就使用
-2. 如果相同的内容已经被执行, 请不要重复执行
 
-请使用 Tool Calls 来执行 actions. 你可以同时调用多个 tools.
-""",
-        "planner_mentioned_user_prompt",
+def _build_planner_state_block(
+    *,
+    time_block: str,
+    reply_stats_block: str,
+    is_mentioned: bool,
+    has_consecutive_no_reply: bool,
+) -> str:
+    mention_state = "最新消息明确提到了你，需要优先判断该不该立即行动。" if is_mentioned else "最新消息没有明确提到你。"
+    no_reply_state = (
+        "最近连续多次未回复，本轮允许继续保持 no_reply_until_call，除非你确信需要行动。"
+        if has_consecutive_no_reply
+        else "如果你确信需要回应，可以直接选择动作，不必为了保守而强行沉默。"
     )
+    return "\n".join([time_block, reply_stats_block, mention_state, no_reply_state])
+
+
+def _build_planner_chat_history_block(chat_content_block: str) -> str:
+    return _join_non_empty(
+        "聊天内容:",
+        chat_content_block,
+    )
+
+
+def _build_planner_task_block(is_mentioned: bool) -> str:
+    instructions = [
+        "任务清单:",
+        "1. 先判断最新一条消息究竟是发给谁的，不要默认是发给你。",
+        "2. 逐个检查当前所有可用 action 是否真的满足触发条件，不要只凭直觉挑一个。",
+        "3. 如果同类内容刚执行过，不要重复执行。",
+        "4. 如果没有足够依据说明你应该行动，就不要勉强选择动作。",
+        "5. 一旦确认要行动，直接使用 tool calls 选择动作，不要输出额外解释。",
+    ]
+    if is_mentioned:
+        instructions.insert(4, "4. 由于消息提到了你，需要优先判断哪个动作最匹配当前上下文。")
+    return "\n".join(instructions)
 
 
 def format_time_delta(seconds: float) -> str:
@@ -111,42 +127,48 @@ async def build_planner_prompts(
     has_consecutive_no_reply: bool,
     plan_log: List[Tuple[str, float, Union[List[ActionPlannerInfo], str]]],
     reply_window_seconds: float,
-) -> tuple[str, str, bool, bool]:
+) -> tuple[list[PromptBlock], str, str, bool, bool]:
     try:
-        moderation_prompt_block = "请不要输出违法违规内容，不要输出色情，暴力，政治相关内容，如有敏感内容，请规避。"
         time_block = f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        bot_name = global_config.bot.nickname
-        bot_nickname = f",也有人叫你{','.join(global_config.bot.alias_names)}" if global_config.bot.alias_names else ""
-        name_block = f"你的名字是{bot_name}{bot_nickname}，请注意哪些是你自己的发言。"
         reply_stats_block = build_reply_stats_block(plan_log, window_seconds=reply_window_seconds)
 
-        system_prompt = await global_prompt_manager.format_prompt(
-            "planner_system_prompt",
-            name_block=name_block,
-            interest=interest,
-            plan_style=global_config.personality.plan_style,
-            moderation_prompt=moderation_prompt_block,
+        allow_no_reply_until_call = not is_mentioned and has_consecutive_no_reply
+        allow_reply_action = not is_mentioned
+
+        assembled = ContextAssembler().from_parts(
+            system_parts={
+                "policy": _build_planner_policy_block(global_config.personality.plan_style),
+                "identity": _build_planner_identity_block(interest),
+            },
+            user_parts={
+                "state": _build_planner_state_block(
+                    time_block=time_block,
+                    reply_stats_block=reply_stats_block,
+                    is_mentioned=is_mentioned,
+                    has_consecutive_no_reply=has_consecutive_no_reply,
+                ),
+                "chat_history": _build_planner_chat_history_block(chat_content_block),
+                "task": _build_planner_task_block(is_mentioned),
+            },
         )
-
-        if is_mentioned:
-            allow_no_reply_until_call = False
-            allow_reply_action = False
-            prompt_name = "planner_mentioned_user_prompt"
-        else:
-            allow_no_reply_until_call = has_consecutive_no_reply
-            allow_reply_action = True
-            prompt_name = "planner_user_prompt"
-
-        prompt = await global_prompt_manager.format_prompt(
-            prompt_name,
-            time_block=time_block,
-            reply_stats_block=reply_stats_block,
-            chat_context_description="你现在正在一个群聊中",
-            chat_content_block=chat_content_block,
+        planner_profile = build_agent_profile("planner_default")
+        prepared_prompt = PromptComposer().prepare(assembled.blocks, planner_profile)
+        composed = PromptComposer().compose(prepared_prompt.blocks)
+        return (
+            prepared_prompt.blocks,
+            composed.user_prompt,
+            composed.system_prompt,
+            allow_no_reply_until_call,
+            allow_reply_action,
         )
-
-        return prompt, system_prompt, allow_no_reply_until_call, allow_reply_action
     except Exception as exc:
         logger.error(f"构建 Planner 提示词时出错: {exc}")
         logger.error(traceback.format_exc())
-        return "构建 Planner Prompt 时出错", "", False, True
+        fallback_prompt = "任务清单:\n1. 检查最新消息是否明确发给你。\n2. 只使用 tool calls 选择动作。"
+        return (
+            ContextAssembler().from_parts(user_parts={"task": fallback_prompt}).blocks,
+            fallback_prompt,
+            "",
+            False,
+            True,
+        )

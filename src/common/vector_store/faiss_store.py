@@ -31,10 +31,46 @@ class FaissVectorStore(VectorStoreBase):
         quantizer = faiss.IndexFlatL2(self.dimension)
         self.index = faiss.IndexIDMap(quantizer)
 
+    def _prepare_vectors(self, vectors: np.ndarray) -> np.ndarray:
+        prepared = np.asarray(vectors, dtype=np.float32)
+        if prepared.ndim == 1:
+            prepared = prepared.reshape(1, -1)
+        if prepared.ndim != 2:
+            raise ValueError(f"向量必须是二维数组，当前 shape={prepared.shape}")
+        if prepared.shape[0] == 0:
+            raise ValueError("向量数组不能为空")
+        return prepared
+
+    def _ensure_index_dimension(self, vector_dimension: int) -> None:
+        if self.index is None:
+            self.dimension = vector_dimension
+            self._init_index()
+            return
+
+        current_dimension = self.index.d
+        if current_dimension == vector_dimension:
+            return
+
+        if self.index.ntotal == 0:
+            logger.warning(
+                f"检测到空向量索引维度与当前向量不一致，自动重建索引: {current_dimension} -> {vector_dimension}"
+            )
+            self.dimension = vector_dimension
+            self._init_index()
+            self.metadata = {}
+            self._int_id_to_uid = {}
+            return
+
+        raise ValueError(
+            f"向量维度不匹配: 索引维度={current_dimension}, 输入维度={vector_dimension}。"
+            f"请保持 embedding 模型维度一致，或清理旧索引文件后重建: {self.index_path}"
+        )
+
     def load(self):
         if os.path.exists(self.index_path) and os.path.exists(self.metadata_path):
             try:
                 self.index = faiss.read_index(self.index_path)
+                self.dimension = self.index.d
                 with open(self.metadata_path, "r", encoding="utf-8") as f:
                     self.metadata = json.load(f)
                 # Rebuild cache
@@ -63,8 +99,8 @@ class FaissVectorStore(VectorStoreBase):
     async def add(
         self, texts: List[str], vectors: np.ndarray, metadatas: Optional[List[Dict[str, Any]]] = None
     ) -> List[str]:
-        if self.index is None:
-            self._init_index()
+        prepared_vectors = self._prepare_vectors(vectors)
+        self._ensure_index_dimension(prepared_vectors.shape[1])
 
         count = len(texts)
         if count == 0:
@@ -110,7 +146,7 @@ class FaissVectorStore(VectorStoreBase):
             self.metadata[uid] = meta
             self._int_id_to_uid[int_id] = uid
 
-        self.index.add_with_ids(vectors, np.array(int_ids, dtype=np.int64))
+        self.index.add_with_ids(prepared_vectors, np.array(int_ids, dtype=np.int64))
         self.save()
         return ids
 
@@ -120,12 +156,19 @@ class FaissVectorStore(VectorStoreBase):
         if self.index is None or self.index.ntotal == 0:
             return []
 
+        prepared_query = self._prepare_vectors(query_vector)
+        if prepared_query.shape[1] != self.index.d:
+            raise ValueError(
+                f"查询向量维度不匹配: 索引维度={self.index.d}, 输入维度={prepared_query.shape[1]}。"
+                f"请检查 embedding 模型是否与现有索引一致。"
+            )
+
         # If filter provided, we might need to fetch more candidates
         search_k = k
         if filter_fn:
             search_k = min(k * 5, self.index.ntotal)  # Fetch more for filtering
 
-        distances_matrix, indices_matrix = self.index.search(query_vector, search_k)
+        distances_matrix, indices_matrix = self.index.search(prepared_query, search_k)
 
         results = []
 

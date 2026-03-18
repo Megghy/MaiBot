@@ -4,9 +4,7 @@ import time
 from typing import Any, Tuple
 
 from src.chat.knowledge import get_qa_manager
-from src.chat.utils.prompt_builder import global_prompt_manager
 from src.common.logger import get_logger
-from src.config.config import global_config
 from src.llm_models.payload_content.tool_option import ToolParamType
 from src.memory_system.retrieval_agent_helpers import _append_reasoning_summary
 from src.memory_system.retrieval_format import (
@@ -67,6 +65,62 @@ def _build_lpmm_hint() -> str:
     return ""
 
 
+def _build_iteration_policy(
+    *,
+    current_iteration: int,
+    remaining_iterations: int,
+    max_iterations: int,
+    is_final_iteration: bool,
+    lpmm_hint: str,
+) -> str:
+    header = [
+        "你正在参与聊天，需要通过工具搜集信息来回答问题。",
+        f"最大查询轮数: {max_iterations} 轮，当前第 {current_iteration} 轮，剩余 {remaining_iterations} 轮。",
+        "思考必须简短，优先快速收敛，不要为了多查一点信息而无限延长流程。",
+        "优先使用检索到的记忆、聊天记录或知识库信息回答问题。",
+        "如果检索完全失败，但你能基于常识给出高置信度的通用答案，可以使用 source=\"model\"。",
+        "不允许编造明显错误的信息。",
+    ]
+    if is_final_iteration:
+        header.extend(
+            [
+                "这是最后一轮，不允许再调用任何查询类工具。",
+                "你只能在 `found_answer` 和 `not_enough_info` 之间二选一来结束任务。",
+            ]
+        )
+    else:
+        header.extend(
+            [
+                "如果涉及过往事件、态度、冲突或关系变化，优先查询聊天记录。",
+                "如果涉及概念或术语，可以查询 jargon、知识库或基于关键词检索聊天记录。",
+                "如果涉及人物静态档案信息，可以查询人物信息工具，但不要依赖它推断具体事件经过。",
+                lpmm_hint,
+                "当信息不足且需要继续查询时，直接调用最相关的检索工具，可并行调用多个工具。",
+            ]
+        )
+    return "\n".join(line for line in header if line and line.strip())
+
+
+def _build_iteration_task(question: str, *, is_final_iteration: bool) -> str:
+    decision_line = (
+        "现在你需要基于已有信息决定是提交最终答案，还是明确说明信息不足。"
+        if is_final_iteration
+        else "现在你需要判断是继续检索、提交答案，还是判定信息不足。"
+    )
+    return "\n".join(
+        [
+            f"当前问题: {question}",
+            decision_line,
+            "必须通过工具执行最终动作，不要只输出自然语言结论。",
+        ]
+    )
+
+
+def _build_iteration_context(collected_info: str) -> str:
+    prepared_info = _prepare_collected_info_for_prompt(collected_info)
+    return "\n".join(["已收集的信息:", prepared_info])
+
+
 async def _build_iteration_prompt(
     question: str,
     collected_info: str,
@@ -74,9 +128,7 @@ async def _build_iteration_prompt(
     iteration: int,
     max_iterations: int,
     tool_registry,
-) -> tuple[str, list[dict[str, object]], bool]:
-    bot_name = global_config.bot.nickname
-    time_now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+) -> tuple[list[PromptBlock], list[dict[str, object]], bool]:
     current_iteration = iteration + 1
     remaining_iterations = max_iterations - current_iteration
     is_final_iteration = current_iteration >= max_iterations
@@ -86,33 +138,42 @@ async def _build_iteration_prompt(
         logger.info(
             f"ReAct Agent 第 {current_iteration} 次迭代，问题: {question}|可用工具数量: {len(tool_definitions)}（最后一次迭代，仅提供提交工具）"
         )
-        prompt = await global_prompt_manager.format_prompt(
-            "memory_retrieval_react_final_prompt",
-            bot_name=bot_name,
-            time_now=time_now,
-            question=question,
-            collected_info=_prepare_collected_info_for_prompt(collected_info),
-            current_iteration=current_iteration,
-            remaining_iterations=remaining_iterations,
-            max_iterations=max_iterations,
-        )
-        return prompt, tool_definitions, True
+        prompt_blocks = [
+            PromptBlock(
+                name="policy",
+                content=_build_iteration_policy(
+                    current_iteration=current_iteration,
+                    remaining_iterations=remaining_iterations,
+                    max_iterations=max_iterations,
+                    is_final_iteration=True,
+                    lpmm_hint="",
+                ),
+                role=PromptBlockRole.SYSTEM,
+            ),
+            PromptBlock(name="task", content=_build_iteration_task(question, is_final_iteration=True)),
+            PromptBlock(name="context", content=_build_iteration_context(collected_info)),
+        ]
+        return prompt_blocks, tool_definitions, True
 
     tool_definitions = tool_registry.get_tool_definitions()
     tool_definitions.extend(SPECIAL_TOOL_DEFINITIONS)
     logger.info(f"ReAct Agent 第 {current_iteration} 次迭代，问题: {question}|可用工具数量: {len(tool_definitions)}")
-    prompt = await global_prompt_manager.format_prompt(
-        "memory_retrieval_react_prompt_head",
-        bot_name=bot_name,
-        time_now=time_now,
-        question=question,
-        collected_info=_prepare_collected_info_for_prompt(collected_info),
-        current_iteration=current_iteration,
-        remaining_iterations=remaining_iterations,
-        max_iterations=max_iterations,
-        lpmm_hint=_build_lpmm_hint(),
-    )
-    return prompt, tool_definitions, False
+    prompt_blocks = [
+        PromptBlock(
+            name="policy",
+            content=_build_iteration_policy(
+                current_iteration=current_iteration,
+                remaining_iterations=remaining_iterations,
+                max_iterations=max_iterations,
+                is_final_iteration=False,
+                lpmm_hint=_build_lpmm_hint(),
+            ),
+            role=PromptBlockRole.SYSTEM,
+        ),
+        PromptBlock(name="task", content=_build_iteration_task(question, is_final_iteration=False)),
+        PromptBlock(name="context", content=_build_iteration_context(collected_info)),
+    ]
+    return prompt_blocks, tool_definitions, False
 
 
 async def _react_agent_solve_question(
@@ -151,7 +212,7 @@ async def _react_agent_solve_question(
             updated_info = _append_collected_info(updated_info, observation)
         state["collected_info"] = updated_info
 
-        prompt, tool_definitions, is_final_iteration = await _build_iteration_prompt(
+        prompt_blocks, tool_definitions, is_final_iteration = await _build_iteration_prompt(
             question,
             updated_info,
             iteration=iteration,
@@ -163,7 +224,7 @@ async def _react_agent_solve_question(
             + ("（最后一次迭代）" if is_final_iteration else "")
         )
         return {
-            "prompt_blocks": [PromptBlock(name="task", content=prompt, role=PromptBlockRole.SYSTEM)],
+            "prompt_blocks": prompt_blocks,
             "tool_definitions": tool_definitions,
         }
 

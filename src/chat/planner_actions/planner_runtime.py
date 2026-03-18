@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from src.chat.planner_actions.planner_tools import (
@@ -21,7 +21,7 @@ from src.config.config import global_config
 from src.llm_models.payload_content.tool_option import ToolCall
 from src.llm_models.utils_model import LLMRequest
 from src.plugin_system.base.component_types import ActionInfo
-from src.runtime.agent import AgentMode, AgentProfile, AgentRequest, AgentRunner, PromptBlock, PromptBlockRole
+from src.runtime.agent import AgentRequest, AgentRunner, PromptBlock, PromptBlockRole, build_agent_profile
 
 if TYPE_CHECKING:
     from src.common.data_models.database_data_model import DatabaseMessages
@@ -45,6 +45,7 @@ class PreparedPlannerExecution:
     system_prompt: Optional[str] = None
     include_no_reply_until_call: bool = False
     include_reply: bool = True
+    prompt_blocks: List[PromptBlock] = field(default_factory=list)
 
 
 def collect_planner_chat_context(chat_id: str, last_obs_time_mark: float) -> PlannerChatContext:
@@ -106,18 +107,14 @@ async def execute_planner_llm(
                 user_id=None,
                 message=prepared_execution.prompt,
                 skill_name="planner_default",
-                prompt_blocks=[
+                prompt_blocks=prepared_execution.prompt_blocks
+                or [
                     PromptBlock(name="policy", content=prepared_execution.system_prompt or "", role=PromptBlockRole.SYSTEM),
                     PromptBlock(name="task", content=prepared_execution.prompt, role=PromptBlockRole.USER),
                 ],
                 metadata={"tool_definitions": tools},
             ),
-            AgentProfile(
-                name="planner_default",
-                skill_name="planner_default",
-                agent_mode=AgentMode.SINGLE_PASS,
-                model_task="planner",
-            ),
+            build_agent_profile("planner_default"),
             llm_request=planner_llm,
         )
         llm_content = agent_result.output_text

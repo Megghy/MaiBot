@@ -22,6 +22,7 @@ from src.common.logger import get_logger
 from src.config.config import global_config, model_config
 from src.llm_models.utils_model import LLMRequest
 from src.plugin_system.base.component_types import ActionInfo
+from src.runtime.agent import PromptBlock
 
 if TYPE_CHECKING:
     from src.common.data_models.database_data_model import DatabaseMessages
@@ -76,7 +77,7 @@ class ActionPlanner:
             logger.info(f"{self.log_prefix}提及时没有可用动作，跳过plan调用")
             return []
 
-        prompt, system_prompt, message_id_list = await self.build_planner_prompt(
+        prompt_blocks, prompt, system_prompt, message_id_list = await self.build_planner_prompt(
             is_group_chat=is_group_chat,
             chat_target_info=chat_target_info,
             current_available_actions=selected_actions,
@@ -88,6 +89,7 @@ class ActionPlanner:
 
         reasoning, actions = await self._execute_main_planner(
             prepared_execution=PreparedPlannerExecution(
+                prompt_blocks=prompt_blocks,
                 prompt=prompt,
                 message_id_list=message_id_list,
                 filtered_actions=selected_actions,
@@ -176,10 +178,10 @@ class ActionPlanner:
         chat_content_block: str = "",
         interest: str = "",
         is_mentioned: bool = False,
-    ) -> tuple[str, str, List[Tuple[str, "DatabaseMessages"]]]:
+    ) -> tuple[List[PromptBlock], str, str, List[Tuple[str, "DatabaseMessages"]]]:
         del is_group_chat, chat_target_info, current_available_actions
 
-        prompt, system_prompt, allow_no_reply_until_call, allow_reply_action = await build_planner_prompts(
+        prompt_blocks, prompt, system_prompt, allow_no_reply_until_call, allow_reply_action = await build_planner_prompts(
             interest=interest,
             chat_content_block=chat_content_block,
             is_mentioned=is_mentioned,
@@ -189,7 +191,7 @@ class ActionPlanner:
         )
         self._allow_no_reply_until_call = allow_no_reply_until_call
         self._allow_reply_action = allow_reply_action
-        return prompt, system_prompt, message_id_list
+        return prompt_blocks, prompt, system_prompt, message_id_list
 
     def get_necessary_info(self) -> Tuple[bool, Optional["TargetPersonInfo"], Dict[str, ActionInfo]]:
         return resolve_necessary_info(

@@ -52,8 +52,7 @@ class MainSystem:
 
     async def schedule_tasks(self):
         """调度定时任务"""
-        while True:
-            await asyncio.gather(*build_service_tasks(self.app, self.server, self.webui_server))
+        await asyncio.gather(*build_service_tasks(self.app, self.server, self.webui_server))
 
     # async def forget_memory_task(self):
     #     """记忆遗忘任务"""

@@ -3,10 +3,20 @@ from typing import Dict, List, Optional, Tuple
 from src.common.data_models.database_data_model import DatabaseMessages
 from src.common.data_models.info_data_model import ActionPlannerInfo
 from src.config.config import global_config
-from src.chat.utils.prompt_builder import global_prompt_manager
 from src.chat.utils.chat_message_builder import build_readable_messages
 from src.plugin_system.base.component_types import ActionInfo
 from src.chat.replyer.base_replyer import BaseReplyer
+from src.chat.replyer.prompt.replyer_prompt import (
+    BASE_REPLY_SAFETY_POLICY,
+    build_chat_customization_block,
+    build_chat_history_block,
+    build_group_identity_block,
+    build_group_reply_task,
+    build_planner_hint_block,
+    build_reply_memory_block,
+    build_reply_style_block,
+)
+from src.runtime.agent import AssembledContext, ContextAssembler
 
 
 class DefaultReplyer(BaseReplyer):
@@ -34,7 +44,7 @@ class DefaultReplyer(BaseReplyer):
         chosen_actions: Optional[List[ActionPlannerInfo]] = None,
         enable_tool: bool = True,
         reply_time_point: Optional[float] = None,
-    ) -> Tuple[str, str, List[int]]:
+    ) -> Tuple[AssembledContext, List[int]]:
         """
         构建回复器上下文
         """
@@ -48,33 +58,39 @@ class DefaultReplyer(BaseReplyer):
             reply_time_point=reply_time_point,
         )
 
-        # 固定使用群聊回复模板
-        system_prompt = await global_prompt_manager.format_prompt(
-            "replyer_system_prompt",
-            identity=prompt_data["personality_prompt"],
-            bot_name=global_config.bot.nickname,
-            reply_style=global_config.personality.reply_style,
+        assembled = ContextAssembler().from_parts(
+            system_parts={
+                "policy": BASE_REPLY_SAFETY_POLICY,
+                "identity": build_group_identity_block(
+                    prompt_data["personality_prompt"],
+                    global_config.bot.nickname,
+                ),
+                "style": build_reply_style_block(global_config.personality.reply_style),
+            },
+            user_parts={
+                "memory": build_reply_memory_block(
+                    knowledge_prompt=prompt_data["prompt_info"],
+                    memory_retrieval=prompt_data["memory_retrieval"],
+                    person_memory_block=prompt_data["person_memory_block"],
+                    relation_info_block=prompt_data["relation_info"],
+                    extra_info_block=prompt_data["extra_info_block"],
+                    expression_habits_block=prompt_data["expression_habits_block"],
+                    actions_info=prompt_data["actions_info"],
+                ),
+                "tool_observations": prompt_data["tool_results_block"],
+                "chat_history": build_chat_history_block(
+                    time_block=prompt_data["time_block"],
+                    dialogue_prompt=prompt_data["dialogue_prompt"],
+                ),
+                "reply_target": prompt_data["reply_target_block"],
+                "planner_hint": build_planner_hint_block(prompt_data["planner_reasoning"]),
+                "mood_hint": prompt_data["mood_state_prompt"],
+                "chat_customization": build_chat_customization_block(
+                    chat_prompt_block=prompt_data["chat_prompt_block"],
+                    keywords_reaction_prompt=prompt_data["keywords_reaction_prompt"],
+                ),
+                "task": build_group_reply_task(),
+            },
         )
 
-        user_prompt = await global_prompt_manager.format_prompt(
-            "replyer_user_prompt",
-            expression_habits_block=prompt_data["expression_habits_block"],
-            tool_results_block=prompt_data["tool_results_block"],
-            knowledge_prompt=prompt_data["prompt_info"],
-            mood_state=prompt_data["mood_state_prompt"],
-            relation_info_block=prompt_data["relation_info"],
-            extra_info_block=prompt_data["extra_info_block"],
-            action_descriptions=prompt_data["actions_info"],
-            sender_name=prompt_data["sender"],
-            dialogue_prompt=prompt_data["dialogue_prompt"],
-            time_block=prompt_data["time_block"],
-            reply_target_block=prompt_data["reply_target_block"],
-            keywords_reaction_prompt=prompt_data["keywords_reaction_prompt"],
-            moderation_prompt=prompt_data["moderation_prompt_block"],
-            memory_retrieval=prompt_data["memory_retrieval"],
-            chat_prompt=prompt_data["chat_prompt_block"],
-            planner_reasoning=prompt_data["planner_reasoning"],
-            person_memory_block=prompt_data["person_memory_block"],
-        )
-
-        return user_prompt, system_prompt, prompt_data["selected_expressions"]
+        return assembled, prompt_data["selected_expressions"]

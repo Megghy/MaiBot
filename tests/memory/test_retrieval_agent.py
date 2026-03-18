@@ -8,15 +8,12 @@ from src.llm_models.payload_content.tool_option import ToolCall
 
 @pytest.mark.asyncio
 async def test_react_agent_solve_question_returns_terminal_answer(monkeypatch):
-    async def fake_format_prompt(name: str, **kwargs):
-        assert name == "memory_retrieval_react_prompt_head"
-        assert kwargs["question"] == "问题"
-        return "prompt"
-
     class FakeLLM:
         async def generate_response_with_message_async(self, *, message_factory, tools=None):
             messages = message_factory(None)
-            assert messages[0].content == "prompt"
+            assert "你正在参与聊天，需要通过工具搜集信息来回答问题。" in messages[0].content
+            assert "输出要求:" in messages[0].content
+            assert "当前问题: 问题" in messages[1].content
             assert any(item["name"] == "found_answer" for item in (tools or []))
             return (
                 "我已经找到答案",
@@ -27,7 +24,6 @@ async def test_react_agent_solve_question_returns_terminal_answer(monkeypatch):
                 ),
             )
 
-    monkeypatch.setattr(retrieval_agent.global_prompt_manager, "format_prompt", fake_format_prompt)
     monkeypatch.setattr(retrieval_agent.AgentRunner, "_build_llm_request", lambda self, profile: FakeLLM())
     monkeypatch.setattr(retrieval_agent, "_build_lpmm_hint", lambda: "")
     monkeypatch.setattr(retrieval_agent, "_calculate_iteration_budget", lambda question, collected_info: 2)
