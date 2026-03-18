@@ -1,6 +1,7 @@
 from typing import Optional, Type, TYPE_CHECKING
 from src.plugin_system.base.base_tool import BaseTool
 from src.plugin_system.base.component_types import ComponentType
+from src.runtime.agent.tool_registry import ToolRegistry, get_agent_tool_registry
 
 from src.common.logger import get_logger
 
@@ -43,3 +44,14 @@ def get_llm_available_tool_definitions():
 
     llm_available_tools = component_registry.get_llm_available_tools()
     return [(name, tool_class.get_tool_definition()) for name, tool_class in llm_available_tools.items()]
+
+
+def sync_agent_tool_registry(*, registry: ToolRegistry | None = None, overwrite: bool = True) -> ToolRegistry:
+    """同步当前可供LLM使用的插件工具到统一 Agent Tool Registry。"""
+    from src.plugin_system.core import component_registry
+
+    target_registry = registry or get_agent_tool_registry()
+    llm_available_tools = component_registry.get_llm_available_tools()
+    for tool_class in llm_available_tools.values():
+        target_registry.register_plugin_tool_class(tool_class, overwrite=overwrite)
+    return target_registry

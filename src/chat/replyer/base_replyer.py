@@ -23,6 +23,7 @@ from src.chat.utils.chat_message_builder import (
 from src.chat.utils.prompt_builder import global_prompt_manager
 from src.chat.replyer.replyer_utils import build_actions_prompt_text
 from src.chat.replyer.replyer_helpers import (
+    build_external_context_blocks,
     build_expression_habits_block,
     build_keywords_reaction_prompt_text,
     build_mood_state_prompt_block,
@@ -45,7 +46,7 @@ from src.plugin_system.base.component_types import ActionInfo, EventType
 from src.chat.replyer.prompt.lpmm_prompt import init_lpmm_prompt
 from src.chat.replyer.prompt.replyer_prompt import init_replyer_prompt
 from src.chat.replyer.prompt.rewrite_prompt import init_rewrite_prompt
-from src.memory_system.memory_retrieval import init_memory_retrieval_prompt, build_memory_retrieval_prompt
+from src.memory_system.memory_retrieval import init_memory_retrieval_prompt
 
 # 初始化 Prompt
 init_lpmm_prompt()
@@ -555,31 +556,29 @@ class BaseReplyer:
                 self.build_expression_habits(chat_talking_prompt_short, target, reply_reason), "expression_habits"
             ),
             self._time_and_run_task(self.build_relation_info(chat_talking_prompt_short, sender), "relation_info"),
-            self._time_and_run_task(
-                self.build_tool_results(chat_talking_prompt_short, sender, target, enable_tool=enable_tool),
-                "tool_results",
-            ),
-            self._time_and_run_task(self.get_prompt_info(chat_talking_prompt_short, sender, target), "prompt_info"),
             self._time_and_run_task(self.build_actions_prompt(available_actions, chosen_actions), "actions_info"),
             self._time_and_run_task(self.build_personality_prompt(), "personality_prompt"),
             self._time_and_run_task(self.build_mood_state_prompt(), "mood_state_prompt"),
             self._time_and_run_task(
-                build_memory_retrieval_prompt(
-                    chat_talking_prompt_short, sender, target, self.chat_stream, self.tool_executor
+                build_external_context_blocks(
+                    self.tool_executor,
+                    chat_talking_prompt_short,
+                    sender,
+                    target,
+                    self.chat_stream,
+                    enable_tool=enable_tool,
                 ),
-                "memory_retrieval",
+                "external_context",
             ),
         )
 
         task_name_mapping = {
             "expression_habits": "选取表达方式",
             "relation_info": "感受关系",
-            "tool_results": "使用工具",
-            "prompt_info": "获取知识",
+            "external_context": "外部上下文",
             "actions_info": "动作信息",
             "personality_prompt": "人格信息",
             "mood_state_prompt": "情绪状态",
-            "memory_retrieval": "记忆检索",
         }
 
         timing_logs: List[str] = []
@@ -606,16 +605,17 @@ class BaseReplyer:
         logger.info(f"回复准备: {timing_summary}")
 
         expression_habits_block, selected_expressions = results_dict.get("expression_habits", ("", []))
+        tool_results_block, prompt_info, memory_retrieval = results_dict.get("external_context", ("", "", ""))
 
         return {
             "expression_habits_block": expression_habits_block,
             "selected_expressions": selected_expressions,
-            "tool_results_block": results_dict.get("tool_results", ""),
-            "prompt_info": results_dict.get("prompt_info", ""),
+            "tool_results_block": tool_results_block,
+            "prompt_info": prompt_info,
             "actions_info": results_dict.get("actions_info", ""),
             "personality_prompt": results_dict.get("personality_prompt", ""),
             "mood_state_prompt": results_dict.get("mood_state_prompt", ""),
-            "memory_retrieval": results_dict.get("memory_retrieval", ""),
+            "memory_retrieval": memory_retrieval,
             "relation_info": results_dict.get("relation_info", ""),
         }
 

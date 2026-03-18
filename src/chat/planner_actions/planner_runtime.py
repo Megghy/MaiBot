@@ -18,8 +18,10 @@ from src.chat.utils.chat_message_builder import (
 from src.common.data_models.info_data_model import ActionPlannerInfo
 from src.common.logger import get_logger
 from src.config.config import global_config
+from src.llm_models.payload_content.tool_option import ToolCall
 from src.llm_models.utils_model import LLMRequest
 from src.plugin_system.base.component_types import ActionInfo
+from src.runtime.agent import AgentMode, AgentProfile, AgentRequest, AgentRunner, PromptBlock, PromptBlockRole
 
 if TYPE_CHECKING:
     from src.common.data_models.database_data_model import DatabaseMessages
@@ -87,7 +89,7 @@ async def execute_planner_llm(
 ) -> Tuple[str, List[ActionPlannerInfo]]:
     llm_content = ""
     reasoning_text = ""
-    tool_calls = None
+    tool_calls: list[ToolCall] | None = None
     actions: List[ActionPlannerInfo] = []
 
     try:
@@ -96,20 +98,39 @@ async def execute_planner_llm(
             include_no_reply_until_call=prepared_execution.include_no_reply_until_call,
             include_reply=prepared_execution.include_reply,
         )
-        llm_content, (reasoning_content, _, tool_calls) = await planner_llm.generate_response_async(
-            prompt=prepared_execution.prompt,
-            tools=tools,
-            system_prompt=prepared_execution.system_prompt,
+        runner = AgentRunner()
+        agent_result = await runner.run(
+            AgentRequest(
+                request_id=f"planner:{int(time.time() * 1000)}",
+                chat_id="planner",
+                user_id=None,
+                message=prepared_execution.prompt,
+                skill_name="planner_default",
+                prompt_blocks=[
+                    PromptBlock(name="policy", content=prepared_execution.system_prompt or "", role=PromptBlockRole.SYSTEM),
+                    PromptBlock(name="task", content=prepared_execution.prompt, role=PromptBlockRole.USER),
+                ],
+                metadata={"tool_definitions": tools},
+            ),
+            AgentProfile(
+                name="planner_default",
+                skill_name="planner_default",
+                agent_mode=AgentMode.SINGLE_PASS,
+                model_task="planner",
+            ),
+            llm_request=planner_llm,
         )
-        reasoning_text = reasoning_content or llm_content or ""
+        llm_content = agent_result.output_text
+        reasoning_text = agent_result.reasoning or llm_content or ""
+        tool_calls = [ToolCall(record.call_id, record.tool_name, record.args) for record in agent_result.tool_calls]
 
         if global_config.debug.show_planner_prompt:
             logger.info(f"{log_prefix}规划器原始提示词: {prepared_execution.prompt}")
             if prepared_execution.system_prompt:
                 logger.info(f"{log_prefix}规划器系统提示词: {prepared_execution.system_prompt}")
             logger.info(f"{log_prefix}规划器原始响应: {llm_content}")
-            if reasoning_content:
-                logger.info(f"{log_prefix}规划器推理: {reasoning_content}")
+            if agent_result.reasoning:
+                logger.info(f"{log_prefix}规划器推理: {agent_result.reasoning}")
             if tool_calls:
                 logger.info(f"{log_prefix}规划器工具调用: {[tool.func_name for tool in tool_calls]}")
         else:
@@ -117,8 +138,8 @@ async def execute_planner_llm(
             if prepared_execution.system_prompt:
                 logger.debug(f"{log_prefix}规划器系统提示词: {prepared_execution.system_prompt}")
             logger.debug(f"{log_prefix}规划器原始响应: {llm_content}")
-            if reasoning_content:
-                logger.debug(f"{log_prefix}规划器推理: {reasoning_content}")
+            if agent_result.reasoning:
+                logger.debug(f"{log_prefix}规划器推理: {agent_result.reasoning}")
     except Exception as exc:
         logger.error(f"{log_prefix}LLM 请求执行失败: {exc}")
         return f"LLM 请求失败，模型出现问题: {exc}", create_no_reply(

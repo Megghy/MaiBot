@@ -1,21 +1,17 @@
 from __future__ import annotations
 
 import time
-from typing import Tuple
+from typing import Any, Tuple
 
 from src.chat.knowledge import get_qa_manager
 from src.chat.utils.prompt_builder import global_prompt_manager
 from src.common.logger import get_logger
-from src.config.config import global_config, model_config
-from src.llm_models.payload_content.message import Message
+from src.config.config import global_config
 from src.llm_models.payload_content.tool_option import ToolParamType
 from src.memory_system.retrieval_agent_helpers import (
     TerminalToolOutcome,
     ToolExecutionOutcome,
     _append_reasoning_summary,
-    _append_tool_observation_message,
-    _build_assistant_message,
-    _build_message_factory,
     _execute_tool_calls,
     _resolve_terminal_tool_calls,
 )
@@ -25,8 +21,8 @@ from src.memory_system.retrieval_format import (
     _has_successful_observation,
     _prepare_collected_info_for_prompt,
 )
-from src.memory_system.retrieval_tools import get_tool_registry
-from src.plugin_system.apis import llm_api
+from src.memory_system.retrieval_tools import build_agent_tool_registry
+from src.runtime.agent import AgentRequest, AgentRunner, AgentStatus, PromptBlock, PromptBlockRole, build_agent_profile
 
 logger = get_logger("memory_retrieval")
 
@@ -133,105 +129,115 @@ async def _react_agent_solve_question(
     initial_info: str = "",
 ) -> Tuple[bool, str, list[dict[str, object]], bool]:
     """使用ReAct架构的Agent来解决问题"""
-    start_time = time.time()
-    collected_info = _append_collected_info("", initial_info)
     configured_budget = max(1, max_iterations or 1)
+    collected_info = _append_collected_info("", initial_info)
     dynamic_budget = _calculate_iteration_budget(question, collected_info)
     max_iterations = max(1, min(configured_budget, dynamic_budget or configured_budget))
-    thinking_steps: list[dict[str, object]] = []
-    is_timeout = False
-    conversation_messages: list[Message] = []
 
-    for iteration in range(max_iterations):
-        if time.time() - start_time > timeout:
-            logger.warning(f"ReAct Agent超时，已迭代{iteration}次")
-            is_timeout = True
-            break
+    agent_tool_registry = build_agent_tool_registry()
 
-        tool_registry = get_tool_registry()
-        prompt, tool_definitions, is_final_iteration = await _build_iteration_prompt(
-            question,
-            collected_info,
-            iteration=iteration,
-            max_iterations=max_iterations,
-            tool_registry=tool_registry,
-        )
+    loop_state: dict[str, Any] = {
+        "question": question,
+        "collected_info": collected_info,
+        "legacy_registry": agent_tool_registry,
+    }
 
-        (
-            success,
-            response,
-            reasoning_content,
-            model_name,
-            tool_calls,
-        ) = await llm_api.generate_with_model_with_tools_by_message_factory(
-            _build_message_factory(
-                prompt,
-                conversation_messages,
-                show_memory_prompt=global_config.debug.show_memory_prompt,
-            ),
-            model_config=model_config.model_task_config.tool_use,
-            tool_options=tool_definitions,
-            request_type="memory.react",
-        )
-
-        logger.info(
-            f"ReAct Agent 第 {iteration + 1} 次迭代 模型: {model_name} ，调用工具数量: {len(tool_calls) if tool_calls else 0} ，调用工具响应: {response}"
-        )
-
-        if not success:
-            logger.error(f"ReAct Agent LLM调用失败: {response}")
-            break
-
-        assistant_message = _build_assistant_message(response, tool_calls or [])
-        step: dict[str, object] = {"iteration": iteration + 1, "thought": response, "actions": [], "observations": []}
-
-        if assistant_message:
-            conversation_messages.append(assistant_message)
-
-        if reasoning_content or response:
-            collected_info = _append_reasoning_summary(
-                collected_info,
-                reasoning_content,
-                response,
+    async def loop_factory(*, iteration: int, max_iterations: int, result, state, default_tool_definitions):
+        updated_info = state.get("collected_info", "")
+        last_reasoning = state.pop("last_reasoning", "")
+        last_response = state.pop("last_response", "")
+        if last_reasoning or last_response:
+            updated_info = _append_reasoning_summary(
+                updated_info,
+                last_reasoning,
+                last_response,
                 _append_collected_info,
             )
+        for observation in state.pop("pending_observations", []):
+            updated_info = _append_collected_info(updated_info, observation)
+        state["collected_info"] = updated_info
 
-        if not tool_calls:
-            if response and response.strip():
-                step["observations"] = [f"思考完成，但未调用工具。响应: {response}"]
-                logger.info(f"ReAct Agent 第 {iteration + 1} 次迭代 思考完成但未调用工具: {response[:100]}...")
-                collected_info = _append_collected_info(collected_info, f"思考: {response}")
-                thinking_steps.append(step)
-                continue
-
-            logger.warning(f"ReAct Agent 第 {iteration + 1} 次迭代 无工具调用且无响应")
-            step["observations"] = ["无响应且无工具调用"]
-            thinking_steps.append(step)
-            break
-
-        terminal_outcome = _resolve_terminal_tool_calls(tool_calls, step, thinking_steps, iteration)
-        if terminal_outcome is not None:
-            return terminal_outcome.found_answer, terminal_outcome.payload, thinking_steps, False
-
-        tool_outcomes = await _execute_tool_calls(
-            tool_registry,
-            tool_calls,
-            chat_id=chat_id,
+        prompt, tool_definitions, is_final_iteration = await _build_iteration_prompt(
+            question,
+            updated_info,
             iteration=iteration,
-            is_final_iteration=is_final_iteration,
+            max_iterations=max_iterations,
+            tool_registry=state["legacy_registry"],
         )
-        for outcome in tool_outcomes:
-            step["actions"].append({"action_type": outcome.action_type, "action_params": outcome.action_params})
-            step["observations"].append(outcome.observation)
-            collected_info = _append_collected_info(collected_info, outcome.observation)
-            _append_tool_observation_message(
-                conversation_messages,
-                tool_call_id=outcome.tool_call_id,
-                observation_text=outcome.observation,
-            )
+        logger.info(
+            f"ReAct Agent 第 {iteration + 1} 次迭代，问题: {question}|可用工具数量: {len(tool_definitions)}"
+            + ("（最后一次迭代）" if is_final_iteration else "")
+        )
+        return {
+            "prompt_blocks": [PromptBlock(name="task", content=prompt, role=PromptBlockRole.SYSTEM)],
+            "tool_definitions": tool_definitions,
+        }
 
-        thinking_steps.append(step)
+    runner = AgentRunner(tool_registry=agent_tool_registry)
+    profile = build_agent_profile(
+        "memory_retrieval",
+        max_iterations=max_iterations,
+        timeout_seconds=timeout,
+    )
+    result = await runner.run(
+        AgentRequest(
+            request_id=f"memory-react:{chat_id}:{int(time.time() * 1000)}",
+            chat_id=chat_id,
+            user_id=None,
+            message=question,
+            skill_name="memory_retrieval",
+            metadata={
+                "tool_loop_factory": loop_factory,
+                "tool_loop_state": loop_state,
+            },
+        ),
+        profile,
+    )
 
+    thinking_steps = []
+    for trace in result.trace:
+        if trace.get("event") != "tool_loop_iteration":
+            continue
+        thinking_steps.append(
+            {
+                "iteration": trace.get("iteration"),
+                "thought": trace.get("response", ""),
+                "reasoning": trace.get("reasoning", ""),
+                "actions": [
+                    {
+                        "action_type": action.get("tool_name", ""),
+                        "action_params": action.get("args", {}) or {},
+                    }
+                    for action in trace.get("actions", [])
+                ],
+                "observations": list(trace.get("observations", [])),
+            }
+        )
+
+    terminal = result.source_summary.get("terminal_tool")
+    if terminal:
+        tool_name = terminal.get("name", "")
+        args = terminal.get("args", {}) or {}
+        if tool_name == "found_answer":
+            return True, str(args.get("answer", "")), thinking_steps, False
+        if tool_name == "not_enough_info":
+            return False, str(args.get("reason", "未知原因")), thinking_steps, False
+
+    collected_info = str(loop_state.get("collected_info", "")).strip()
+    if result.reasoning or result.output_text:
+        collected_info = _append_reasoning_summary(
+            collected_info,
+            result.reasoning,
+            result.output_text,
+            _append_collected_info,
+        )
+    for step in thinking_steps:
+        if step["actions"] or step["observations"]:
+            continue
+        thought = str(step.get("thought", "")).strip()
+        if thought:
+            step["observations"] = [f"思考完成，但未调用工具。响应: {thought}"]
+    is_timeout = result.status == AgentStatus.TIMEOUT
     if collected_info:
         logger.warning(
             f"ReAct Agent达到最大迭代次数或超时，但未明确返回found_answer。已收集信息: {collected_info[:100]}..."

@@ -5,11 +5,13 @@ from typing import Iterable, Type
 
 from src.common.logger import get_logger
 from src.plugin_system.base.plugin_base import PluginBase
+from src.plugin_system.apis.tool_api import sync_agent_tool_registry
 from src.plugin_system.core.plugin_manager import plugin_manager
 from src.plugins.built_in.emoji_plugin.plugin import CoreActionsPlugin
 from src.plugins.built_in.memory_relation_plugin.plugin import MemoryRelationPlugin
 from src.plugins.built_in.plugin_management.plugin import PluginManagementPlugin
 from src.plugins.built_in.tts_plugin.plugin import TTSPlugin
+from src.runtime.agent import init_default_skills
 
 logger = get_logger("runtime_bootstrap")
 
@@ -39,6 +41,8 @@ def register_builtin_plugins(plugin_classes: Iterable[Type[PluginBase]] = BUILT_
 def bootstrap_runtime() -> RuntimeBootstrapResult:
     builtin_loaded, builtin_failed = register_builtin_plugins()
     external_loaded, external_failed = plugin_manager.load_all_plugins()
+    init_default_skills()
+    sync_agent_tool_registry()
     result = RuntimeBootstrapResult(
         builtin_loaded=builtin_loaded,
         external_loaded=external_loaded,

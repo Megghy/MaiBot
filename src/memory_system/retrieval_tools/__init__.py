@@ -16,6 +16,7 @@ from .query_lpmm_knowledge import register_tool as register_lpmm_knowledge
 from .query_person_info import register_tool as register_query_person_info
 from .query_vector import register_tool as register_query_vector
 from src.config.config import global_config
+from src.runtime.agent.tool_registry import ToolRegistry
 
 
 def init_all_tools():
@@ -28,10 +29,19 @@ def init_all_tools():
         register_lpmm_knowledge()
 
 
+def build_agent_tool_registry() -> ToolRegistry:
+    init_all_tools()
+    registry = ToolRegistry()
+    for tool in get_tool_registry().get_all_tools().values():
+        registry.register_memory_tool(tool, tags={"memory"})
+    return registry
+
+
 __all__ = [
     "MemoryRetrievalTool",
     "MemoryRetrievalToolRegistry",
     "register_memory_retrieval_tool",
     "get_tool_registry",
     "init_all_tools",
+    "build_agent_tool_registry",
 ]

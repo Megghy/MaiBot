@@ -242,6 +242,49 @@ async def get_prompt_info_block(tool_executor, message: str, sender: str, target
         return ""
 
 
+async def build_external_context_blocks(
+    tool_executor,
+    chat_history: str,
+    sender: str,
+    target: str,
+    chat_stream,
+    *,
+    enable_tool: bool = True,
+) -> tuple[str, str, str]:
+    """Route reply-side external context through a single path.
+
+    Priority:
+    1. memory retrieval
+    2. explicit knowledge lookup
+    3. generic tool results
+    """
+
+    from src.memory_system.memory_retrieval import build_memory_retrieval_prompt
+
+    memory_retrieval = await build_memory_retrieval_prompt(
+        chat_history,
+        sender,
+        target,
+        chat_stream,
+        tool_executor,
+    )
+    if memory_retrieval.strip():
+        return "", "", memory_retrieval
+
+    prompt_info = await get_prompt_info_block(tool_executor, chat_history, sender, target)
+    if prompt_info.strip():
+        return "", prompt_info, ""
+
+    tool_results = await build_tool_results_block(
+        tool_executor,
+        chat_history,
+        sender,
+        target,
+        enable_tool=enable_tool,
+    )
+    return tool_results, "", ""
+
+
 async def build_relation_info_block(chat_content: str, sender: str) -> str:
     if not global_config.relationship.enable_relationship:
         return ""

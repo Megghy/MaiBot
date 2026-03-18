@@ -87,28 +87,27 @@ async def test_execute_tool_calls_ignores_non_terminal_tools_in_final_iteration(
 
 @pytest.mark.asyncio
 async def test_react_agent_solve_question_returns_terminal_answer(monkeypatch):
-    class FakeRegistry:
-        def get_tool_definitions(self):
-            return []
-
     async def fake_format_prompt(name: str, **kwargs):
         assert name == "memory_retrieval_react_prompt_head"
         assert kwargs["question"] == "问题"
         return "prompt"
 
-    async def fake_generate(*args, **kwargs):
-        assert kwargs["request_type"] == "memory.react"
-        return (
-            True,
-            "我已经找到答案",
-            "",
-            "fake-model",
-            [ToolCall("call-1", "found_answer", {"answer": "答案", "source": "memory"})],
-        )
+    class FakeLLM:
+        async def generate_response_with_message_async(self, *, message_factory, tools=None):
+            messages = message_factory(None)
+            assert messages[0].content == "prompt"
+            assert any(item["name"] == "found_answer" for item in (tools or []))
+            return (
+                "我已经找到答案",
+                (
+                    "",
+                    "fake-model",
+                    [ToolCall("call-1", "found_answer", {"answer": "答案", "source": "memory"})],
+                ),
+            )
 
-    monkeypatch.setattr(retrieval_agent, "get_tool_registry", lambda: FakeRegistry())
     monkeypatch.setattr(retrieval_agent.global_prompt_manager, "format_prompt", fake_format_prompt)
-    monkeypatch.setattr(retrieval_agent.llm_api, "generate_with_model_with_tools_by_message_factory", fake_generate)
+    monkeypatch.setattr(retrieval_agent.AgentRunner, "_build_llm_request", lambda self, profile: FakeLLM())
     monkeypatch.setattr(retrieval_agent, "_build_lpmm_hint", lambda: "")
     monkeypatch.setattr(retrieval_agent, "_calculate_iteration_budget", lambda question, collected_info: 2)
 
