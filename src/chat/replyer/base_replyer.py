@@ -23,6 +23,7 @@ from src.chat.utils.chat_message_builder import (
 )
 from src.chat.utils.prompt_builder import global_prompt_manager
 from src.chat.replyer.replyer_utils import build_actions_prompt_text
+from src.chat.replyer.replyer_utils import build_person_memory_block
 from src.chat.replyer.replyer_helpers import (
     build_external_context_blocks,
     build_expression_habits_block,
@@ -32,6 +33,7 @@ from src.chat.replyer.replyer_helpers import (
     build_relation_info_block,
     get_chat_prompt_by_type,
 )
+from src.person_info.person_info import Person
 from src.chat.replyer.target_utils import (
     build_reply_target_block_text,
     parse_reply_target,
@@ -390,6 +392,130 @@ class BaseReplyer:
     ) -> Tuple[str, str, List[int]]:
         """构建回复器上下文 (抽象方法)"""
         raise NotImplementedError
+
+    def build_chat_history_prompt(self, message_list_before_now: List[DatabaseMessages]) -> str:
+        if not message_list_before_now:
+            return ""
+
+        latest_msgs = message_list_before_now[-int(global_config.chat.max_context_size) :]
+        return build_readable_messages(
+            latest_msgs,
+            replace_bot_name=True,
+            timestamp_mode="relative",
+            read_mark=0.0,
+            show_actions=True,
+            show_pic_mapping_header=False,
+        )
+
+    async def _prepare_reply_prompt_common_context(
+        self,
+        *,
+        reply_message: Optional[DatabaseMessages] = None,
+        extra_info: str = "",
+        reply_reason: str = "",
+        available_actions: Optional[Dict[str, ActionInfo]] = None,
+        chosen_actions: Optional[List[ActionPlannerInfo]] = None,
+        enable_tool: bool = True,
+        reply_time_point: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        if reply_time_point is None:
+            reply_time_point = time.time()
+
+        if available_actions is None:
+            available_actions = {}
+
+        chat_stream = self.chat_stream
+        chat_id = chat_stream.stream_id
+        platform = chat_stream.platform
+        group_id: Optional[str] = None
+        if getattr(chat_stream, "group_info", None):
+            group_id = getattr(chat_stream.group_info, "group_id", None)
+
+        user_id = "用户ID"
+        sender = "用户"
+        target = "消息"
+        target_person: Optional[Any] = None
+        if reply_message:
+            user_id = reply_message.user_info.user_id
+            person = Person(platform=platform, user_id=user_id)
+            target_person = person
+            sender = person.person_name or user_id
+            target = reply_message.processed_plain_text
+
+        target, has_only_pics, has_text, pic_part, text_part = self._process_target_content(target, chat_stream.platform)
+        person_memory_block = build_person_memory_block(target_person, group_id=group_id if self.is_group_chat else None)
+
+        message_list_before_now_long = get_raw_msg_before_timestamp_with_chat(
+            chat_id=chat_id,
+            timestamp=reply_time_point,
+            limit=global_config.chat.max_context_size,
+        )
+        message_list_before_short = get_raw_msg_before_timestamp_with_chat(
+            chat_id=chat_id,
+            timestamp=reply_time_point,
+            limit=int(global_config.chat.max_context_size * 0.33),
+        )
+
+        dialogue_prompt = self.build_chat_history_prompt(message_list_before_now_long)
+        chat_talking_prompt_short = build_readable_messages(
+            message_list_before_short,
+            replace_bot_name=True,
+            timestamp_mode="relative",
+            read_mark=0.0,
+            show_actions=True,
+            show_pic_mapping_header=False,
+        )
+
+        gather_results = await self._gather_common_reply_blocks(
+            chat_talking_prompt_short,
+            sender,
+            target,
+            reply_reason,
+            available_actions=available_actions,
+            chosen_actions=chosen_actions,
+            enable_tool=enable_tool,
+        )
+
+        planner_reasoning = ""
+        if global_config.chat.include_planner_reasoning and reply_reason:
+            planner_reasoning = f"你的想法是：{reply_reason}"
+
+        extra_info_block = (
+            f"以下是你在回复时需要参考的信息，现在请你阅读以下内容，进行决策\n{extra_info}\n以上是你在回复时需要参考的信息，现在请你阅读以下内容，进行决策"
+            if extra_info
+            else ""
+        )
+        time_block = f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        moderation_prompt_block = "请不要输出违法违规内容，不要输出色情，暴力，政治相关内容，如有敏感内容，请规避。"
+        reply_target_block = self._build_reply_target_block_text(
+            is_group_chat=self.is_group_chat,
+            sender=sender,
+            target=target,
+            has_only_pics=has_only_pics,
+            has_text=has_text,
+            pic_part=pic_part,
+            text_part=text_part,
+        )
+        chat_prompt_content = self._get_chat_prompt_by_type(chat_id, "group" if self.is_group_chat else "private")
+        chat_prompt_block = f"{chat_prompt_content}\n" if chat_prompt_content else ""
+        keywords_reaction_prompt = await self.build_keywords_reaction_prompt(target)
+
+        return {
+            "user_id": user_id,
+            "sender": sender,
+            "target": target,
+            "target_person": target_person,
+            "person_memory_block": person_memory_block,
+            "dialogue_prompt": dialogue_prompt,
+            "planner_reasoning": planner_reasoning,
+            "extra_info_block": extra_info_block,
+            "time_block": time_block,
+            "moderation_prompt_block": moderation_prompt_block,
+            "reply_target_block": reply_target_block,
+            "chat_prompt_block": chat_prompt_block,
+            "keywords_reaction_prompt": keywords_reaction_prompt,
+            **gather_results,
+        }
 
     async def build_prompt_rewrite_context(
         self,
