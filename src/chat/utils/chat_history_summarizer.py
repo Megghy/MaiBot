@@ -126,7 +126,9 @@ class ChatHistorySummarizer:
                 before_count = len(self.current_batch.messages)
                 self.current_batch.messages.extend(new_messages)
                 self.current_batch.end_time = current_time
-                logger.info(f"{self.log_prefix} 更新聊天话题: {before_count} -> {len(self.current_batch.messages)} 条消息")
+                logger.info(
+                    f"{self.log_prefix} 更新聊天话题: {before_count} -> {len(self.current_batch.messages)} 条消息"
+                )
             else:
                 # 创建新批次
                 self.current_batch = MessageBatch(
@@ -492,10 +494,12 @@ class ChatHistorySummarizer:
                         mems = [m.get("content", "").strip() for m in person.memory_points if m.get("content")]
                         if mems:
                             recent = mems[-15:]
-                            existing_memories_text += f"\n[{p_name}] 的现有记忆 (参考):\n" + "\n".join([f"- {m}" for m in recent])
+                            existing_memories_text += f"\n[{p_name}] 的现有记忆 (参考):\n" + "\n".join(
+                                [f"- {m}" for m in recent]
+                            )
             except Exception:
                 pass
-        
+
         if not existing_memories_text:
             existing_memories_text = "(暂无相关记忆)"
 

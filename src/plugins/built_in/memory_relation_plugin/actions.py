@@ -8,7 +8,7 @@ from src.memory_system.memory_writer import (
     persist_memory_request,
     resolve_target_person,
 )
-from src.plugin_system import BaseAction, ActionActivationType
+from src.plugin_system.base import ActionActivationType, BaseAction
 
 logger = get_logger("memory_relation_actions")
 
@@ -56,7 +56,7 @@ async def _persist_memory_from_candidates(
         logger.debug("%s: 没有可写入的记忆内容", action.action_name)
         return False, "没有可写入的记忆内容"
 
-    persisted = persist_memory_request(request)
+    persisted = await persist_memory_request(request)
     if not persisted:
         return False, "写入记忆失败，可能是重复内容"
 
@@ -133,11 +133,11 @@ class BuildRelationAction(BaseAction):
         chat_context = self.action_data.get("chat_context") or _extract_chat_context(
             self.action_message, fallback=self.action_reasoning or ""
         )
-        
+
         try:
             # Use new method in Person
             summary = await person.record_relation(chat_context, source="Action:build_relation")
-            
+
             if summary:
                 await self.store_action_info(
                     action_build_into_prompt=True,

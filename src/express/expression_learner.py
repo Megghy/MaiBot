@@ -124,6 +124,14 @@ class ExpressionLearner:
         self.min_messages_for_learning = 15 / self.learning_intensity  # 触发学习所需的最少消息数
         self.min_learning_interval = 120 / self.learning_intensity
 
+    def refresh_runtime_config(self) -> None:
+        """应用运行时配置热更新。"""
+        _, self.enable_learning, self.learning_intensity = global_config.expression.get_expression_config_for_chat(
+            self.chat_id
+        )
+        self.min_messages_for_learning = 15 / self.learning_intensity
+        self.min_learning_interval = 120 / self.learning_intensity
+
     def should_trigger_learning(self) -> bool:
         """
         检查是否应该触发学习
@@ -255,12 +263,12 @@ class ExpressionLearner:
             elif isinstance(repaired_content, dict):
                 match_responses = [repaired_content]
             elif isinstance(repaired_content, str):
-                 # 有时候repair_json可能返回json string
-                 try:
-                     parsed = json.loads(repaired_content)
-                     match_responses = parsed if isinstance(parsed, list) else [parsed]
-                 except json.JSONDecodeError:
-                     match_responses = []
+                # 有时候repair_json可能返回json string
+                try:
+                    parsed = json.loads(repaired_content)
+                    match_responses = parsed if isinstance(parsed, list) else [parsed]
+                except json.JSONDecodeError:
+                    match_responses = []
             else:
                 match_responses = []
 
@@ -280,7 +288,7 @@ class ExpressionLearner:
                 pair_val = match_response.get("expression_pair")
                 if pair_val is None:
                     continue
-                
+
                 # 兼容字符串或数字类型的序号
                 try:
                     pair_index = int(pair_val) - 1  # 转换为0-based索引
@@ -337,7 +345,7 @@ class ExpressionLearner:
         except Exception as e:
             logger.error(f"学习表达方式失败,模型生成出错: {e}")
             return None
-            
+
         expressions: List[Tuple[str, str]] = self.parse_expression_response(response)
         expressions = self._filter_self_reference_styles(expressions)
         if not expressions:
@@ -397,12 +405,12 @@ class ExpressionLearner:
             elif isinstance(repaired_content, dict):
                 data = [repaired_content]
             elif isinstance(repaired_content, str):
-                 try:
-                     parsed = json.loads(repaired_content)
-                     data = parsed if isinstance(parsed, list) else [parsed]
-                 except json.JSONDecodeError:
-                     data = []
-            
+                try:
+                    parsed = json.loads(repaired_content)
+                    data = parsed if isinstance(parsed, list) else [parsed]
+                except json.JSONDecodeError:
+                    data = []
+
             for item in data:
                 if not isinstance(item, dict):
                     continue
@@ -410,10 +418,10 @@ class ExpressionLearner:
                 style = item.get("style")
                 if situation and style and isinstance(situation, str) and isinstance(style, str):
                     expressions.append((situation.strip(), style.strip()))
-                    
+
         except Exception as e:
             logger.error(f"解析表达风格JSON失败: {e}, 响应: {response}")
-            
+
         return expressions
 
     def _filter_self_reference_styles(self, expressions: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
@@ -593,6 +601,10 @@ class ExpressionLearnerManager:
         if chat_id not in self.expression_learners:
             self.expression_learners[chat_id] = ExpressionLearner(chat_id)
         return self.expression_learners[chat_id]
+
+    def refresh_runtime_config(self) -> None:
+        for learner in self.expression_learners.values():
+            learner.refresh_runtime_config()
 
     def _ensure_expression_directories(self):
         """

@@ -9,6 +9,7 @@ from typing import Any
 
 from src.common.logger import get_logger
 from src.config.config import Config, APIAdapterConfig, CONFIG_DIR
+from src.config.runtime_reload import hot_reload_bot_config, hot_reload_model_config
 from src.config.official_configs import (
     BotConfig,
     PersonalityConfig,
@@ -42,6 +43,8 @@ from src.webui.config_schema import ConfigSchemaGenerator
 logger = get_logger("webui")
 
 router = APIRouter(prefix="/config", tags=["config"])
+REQUEST_BODY = Body(...)
+EMBEDDED_REQUEST_BODY = Body(..., embed=True)
 
 
 # ===== 辅助函数 =====
@@ -78,6 +81,17 @@ def _update_dict_preserve_comments(target: Any, source: Any) -> None:
                         target[key] = value
 
 
+def _build_reload_response(message: str, reload_result) -> dict[str, Any]:
+    response = {
+        "success": True,
+        "message": message,
+        "reload": reload_result.to_dict(),
+    }
+    if reload_result.pending_restart:
+        response["message"] = f"{message}；以下配置项需要重启后才能完全生效: {', '.join(reload_result.pending_restart)}"
+    return response
+
+
 # ===== 架构获取接口 =====
 
 
@@ -90,7 +104,7 @@ async def get_bot_config_schema():
         return {"success": True, "schema": schema}
     except Exception as e:
         logger.error(f"获取配置架构失败: {e}")
-        raise HTTPException(status_code=500, detail=f"获取配置架构失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取配置架构失败: {str(e)}") from e
 
 
 @router.get("/schema/model")
@@ -101,7 +115,7 @@ async def get_model_config_schema():
         return {"success": True, "schema": schema}
     except Exception as e:
         logger.error(f"获取模型配置架构失败: {e}")
-        raise HTTPException(status_code=500, detail=f"获取模型配置架构失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取模型配置架构失败: {str(e)}") from e
 
 
 # ===== 子配置架构获取接口 =====
@@ -174,7 +188,7 @@ async def get_config_section_schema(section_name: str):
         return {"success": True, "schema": schema}
     except Exception as e:
         logger.error(f"获取配置节架构失败: {e}")
-        raise HTTPException(status_code=500, detail=f"获取配置节架构失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取配置节架构失败: {str(e)}") from e
 
 
 # ===== 配置读取接口 =====
@@ -196,7 +210,7 @@ async def get_bot_config():
         raise
     except Exception as e:
         logger.error(f"读取配置文件失败: {e}")
-        raise HTTPException(status_code=500, detail=f"读取配置文件失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"读取配置文件失败: {str(e)}") from e
 
 
 @router.get("/model")
@@ -215,65 +229,67 @@ async def get_model_config():
         raise
     except Exception as e:
         logger.error(f"读取配置文件失败: {e}")
-        raise HTTPException(status_code=500, detail=f"读取配置文件失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"读取配置文件失败: {str(e)}") from e
 
 
 # ===== 配置更新接口 =====
 
 
 @router.post("/bot")
-async def update_bot_config(config_data: dict[str, Any] = Body(...)):
+async def update_bot_config(config_data: dict[str, Any] = REQUEST_BODY):
     """更新麦麦主程序配置"""
     try:
         # 验证配置数据
         try:
             Config.from_dict(config_data)
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"配置数据验证失败: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"配置数据验证失败: {str(e)}") from e
 
         # 保存配置文件
         config_path = os.path.join(CONFIG_DIR, "bot_config.toml")
         with open(config_path, "w", encoding="utf-8") as f:
             tomlkit.dump(config_data, f)
 
+        reload_result = hot_reload_bot_config()
         logger.info("麦麦主程序配置已更新")
-        return {"success": True, "message": "配置已保存"}
+        return _build_reload_response("配置已保存并热生效", reload_result)
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"保存配置文件失败: {e}")
-        raise HTTPException(status_code=500, detail=f"保存配置文件失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"保存配置文件失败: {str(e)}") from e
 
 
 @router.post("/model")
-async def update_model_config(config_data: dict[str, Any] = Body(...)):
+async def update_model_config(config_data: dict[str, Any] = REQUEST_BODY):
     """更新模型配置"""
     try:
         # 验证配置数据
         try:
             APIAdapterConfig.from_dict(config_data)
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"配置数据验证失败: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"配置数据验证失败: {str(e)}") from e
 
         # 保存配置文件
         config_path = os.path.join(CONFIG_DIR, "model_config.toml")
         with open(config_path, "w", encoding="utf-8") as f:
             tomlkit.dump(config_data, f)
 
+        reload_result = hot_reload_model_config()
         logger.info("模型配置已更新")
-        return {"success": True, "message": "配置已保存"}
+        return _build_reload_response("配置已保存并热生效", reload_result)
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"保存配置文件失败: {e}")
-        raise HTTPException(status_code=500, detail=f"保存配置文件失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"保存配置文件失败: {str(e)}") from e
 
 
 # ===== 配置节更新接口 =====
 
 
 @router.post("/bot/section/{section_name}")
-async def update_bot_config_section(section_name: str, section_data: Any = Body(...)):
+async def update_bot_config_section(section_name: str, section_data: Any = REQUEST_BODY):
     """更新麦麦主程序配置的指定节（保留注释和格式）"""
     try:
         # 读取现有配置
@@ -304,19 +320,20 @@ async def update_bot_config_section(section_name: str, section_data: Any = Body(
         try:
             Config.from_dict(config_data)
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"配置数据验证失败: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"配置数据验证失败: {str(e)}") from e
 
         # 保存配置（tomlkit.dump 会保留注释）
         with open(config_path, "w", encoding="utf-8") as f:
             tomlkit.dump(config_data, f)
 
+        reload_result = hot_reload_bot_config()
         logger.info(f"配置节 '{section_name}' 已更新（保留注释）")
-        return {"success": True, "message": f"配置节 '{section_name}' 已保存"}
+        return _build_reload_response(f"配置节 '{section_name}' 已保存并热生效", reload_result)
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"更新配置节失败: {e}")
-        raise HTTPException(status_code=500, detail=f"更新配置节失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"更新配置节失败: {str(e)}") from e
 
 
 # ===== 原始 TOML 文件操作接口 =====
@@ -338,41 +355,42 @@ async def get_bot_config_raw():
         raise
     except Exception as e:
         logger.error(f"读取配置文件失败: {e}")
-        raise HTTPException(status_code=500, detail=f"读取配置文件失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"读取配置文件失败: {str(e)}") from e
 
 
 @router.post("/bot/raw")
-async def update_bot_config_raw(raw_content: str = Body(..., embed=True)):
+async def update_bot_config_raw(raw_content: str = EMBEDDED_REQUEST_BODY):
     """更新麦麦主程序配置（直接保存原始 TOML 内容，会先验证格式）"""
     try:
         # 验证 TOML 格式
         try:
             config_data = tomlkit.loads(raw_content)
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"TOML 格式错误: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"TOML 格式错误: {str(e)}") from e
 
         # 验证配置数据结构
         try:
             Config.from_dict(config_data)
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"配置数据验证失败: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"配置数据验证失败: {str(e)}") from e
 
         # 保存配置文件
         config_path = os.path.join(CONFIG_DIR, "bot_config.toml")
         with open(config_path, "w", encoding="utf-8") as f:
             f.write(raw_content)
 
+        reload_result = hot_reload_bot_config()
         logger.info("麦麦主程序配置已更新（原始模式）")
-        return {"success": True, "message": "配置已保存"}
+        return _build_reload_response("配置已保存并热生效", reload_result)
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"保存配置文件失败: {e}")
-        raise HTTPException(status_code=500, detail=f"保存配置文件失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"保存配置文件失败: {str(e)}") from e
 
 
 @router.post("/model/section/{section_name}")
-async def update_model_config_section(section_name: str, section_data: Any = Body(...)):
+async def update_model_config_section(section_name: str, section_data: Any = REQUEST_BODY):
     """更新模型配置的指定节（保留注释和格式）"""
     try:
         # 读取现有配置
@@ -403,19 +421,20 @@ async def update_model_config_section(section_name: str, section_data: Any = Bod
         try:
             APIAdapterConfig.from_dict(config_data)
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"配置数据验证失败: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"配置数据验证失败: {str(e)}") from e
 
         # 保存配置（tomlkit.dump 会保留注释）
         with open(config_path, "w", encoding="utf-8") as f:
             tomlkit.dump(config_data, f)
 
+        reload_result = hot_reload_model_config()
         logger.info(f"配置节 '{section_name}' 已更新（保留注释）")
-        return {"success": True, "message": f"配置节 '{section_name}' 已保存"}
+        return _build_reload_response(f"配置节 '{section_name}' 已保存并热生效", reload_result)
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"更新配置节失败: {e}")
-        raise HTTPException(status_code=500, detail=f"更新配置节失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"更新配置节失败: {str(e)}") from e
 
 
 # ===== 适配器配置管理接口 =====
@@ -431,6 +450,7 @@ async def get_adapter_config_path():
             return {"success": True, "path": None}
 
         import json
+
         with open(webui_data_path, "r", encoding="utf-8") as f:
             webui_data = json.load(f)
 
@@ -441,6 +461,7 @@ async def get_adapter_config_path():
         # 检查文件是否存在并返回最后修改时间
         if os.path.exists(adapter_config_path):
             import datetime
+
             mtime = os.path.getmtime(adapter_config_path)
             last_modified = datetime.datetime.fromtimestamp(mtime).isoformat()
             return {"success": True, "path": adapter_config_path, "lastModified": last_modified}
@@ -449,11 +470,11 @@ async def get_adapter_config_path():
 
     except Exception as e:
         logger.error(f"获取适配器配置路径失败: {e}")
-        raise HTTPException(status_code=500, detail=f"获取配置路径失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取配置路径失败: {str(e)}") from e
 
 
 @router.post("/adapter-config/path")
-async def save_adapter_config_path(data: dict[str, str] = Body(...)):
+async def save_adapter_config_path(data: dict[str, str] = REQUEST_BODY):
     """保存适配器配置文件路径偏好"""
     try:
         path = data.get("path")
@@ -486,7 +507,7 @@ async def save_adapter_config_path(data: dict[str, str] = Body(...)):
         raise
     except Exception as e:
         logger.error(f"保存适配器配置路径失败: {e}")
-        raise HTTPException(status_code=500, detail=f"保存路径失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"保存路径失败: {str(e)}") from e
 
 
 @router.get("/adapter-config")
@@ -515,11 +536,11 @@ async def get_adapter_config(path: str):
         raise
     except Exception as e:
         logger.error(f"读取适配器配置失败: {e}")
-        raise HTTPException(status_code=500, detail=f"读取配置失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"读取配置失败: {str(e)}") from e
 
 
 @router.post("/adapter-config")
-async def save_adapter_config(data: dict[str, str] = Body(...)):
+async def save_adapter_config(data: dict[str, str] = REQUEST_BODY):
     """保存适配器配置到指定路径"""
     try:
         path = data.get("path")
@@ -537,9 +558,10 @@ async def save_adapter_config(data: dict[str, str] = Body(...)):
         # 验证 TOML 格式
         try:
             import toml
+
             toml.loads(content)
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"TOML 格式错误: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"TOML 格式错误: {str(e)}") from e
 
         # 确保目录存在
         os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
@@ -555,5 +577,4 @@ async def save_adapter_config(data: dict[str, str] = Body(...)):
         raise
     except Exception as e:
         logger.error(f"保存适配器配置失败: {e}")
-        raise HTTPException(status_code=500, detail=f"保存配置失败: {str(e)}")
-
+        raise HTTPException(status_code=500, detail=f"保存配置失败: {str(e)}") from e

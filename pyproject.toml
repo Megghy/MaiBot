@@ -28,6 +28,8 @@ dependencies = [
     "ruff>=0.12.2",
     "setuptools>=80.9.0",
     "structlog>=25.4.0",
+    "pytest>=8.4.1",
+    "pytest-asyncio>=1.1.0",
     "toml>=0.10.2",
     "tomlkit>=0.13.3",
     "urllib3>=2.5.0",
@@ -77,3 +79,7 @@ skip-magic-trailing-comma = false
 
 # 自动检测合适的换行符
 line-ending = "auto"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

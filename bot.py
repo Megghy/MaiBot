@@ -75,23 +75,34 @@ async def graceful_shutdown():  # sourcery skip: use-named-expression
     try:
         logger.info("正在优雅关闭麦麦...")
 
-        # 关闭 WebUI 服务器
+        from src.plugin_system.base.component_types import EventType
+        from src.runtime import events_manager, get_runtime_manager
+        from src.common.server import get_global_server
+
+        # 触发 ON_STOP 事件
+        await events_manager.handle_mai_events(event_type=EventType.ON_STOP)
+
+        # 关闭运行时会话
+        await get_runtime_manager().shutdown()
+
+        # 停止所有异步任务
+        await async_task_manager.stop_and_wait_all_tasks()
+
+        # 关闭 HTTP/WebUI 层
+        try:
+            server = get_global_server()
+            await server.shutdown()
+        except Exception as e:
+            logger.warning(f"关闭 HTTP 服务器时出错: {e}")
+
         try:
             from src.webui.webui_server import get_webui_server
+
             webui_server = get_webui_server()
             if webui_server and webui_server._server:
                 await webui_server.shutdown()
         except Exception as e:
             logger.warning(f"关闭 WebUI 服务器时出错: {e}")
-
-        from src.plugin_system.core.events_manager import events_manager
-        from src.plugin_system.base.component_types import EventType
-
-        # 触发 ON_STOP 事件
-        await events_manager.handle_mai_events(event_type=EventType.ON_STOP)
-
-        # 停止所有异步任务
-        await async_task_manager.stop_and_wait_all_tasks()
 
         # 获取所有剩余任务，排除当前任务
         remaining_tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]

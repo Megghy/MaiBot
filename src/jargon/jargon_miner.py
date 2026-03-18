@@ -456,15 +456,17 @@ class JargonMiner:
 
             # Add to vector store if meaning is available
             if jargon_obj.meaning:
-                asyncio.create_task(vector_manager.add_jargon(
-                    jargon_obj.content, 
-                    {
-                        "meaning": jargon_obj.meaning, 
-                        "chat_id": jargon_obj.chat_id,
-                        "is_global": jargon_obj.is_global,
-                        "jargon_id": jargon_obj.id
-                    }
-                ))
+                asyncio.create_task(
+                    vector_manager.add_jargon(
+                        jargon_obj.content,
+                        {
+                            "meaning": jargon_obj.meaning,
+                            "chat_id": jargon_obj.chat_id,
+                            "is_global": jargon_obj.is_global,
+                            "jargon_id": jargon_obj.id,
+                        },
+                    )
+                )
 
             logger.debug(
                 f"jargon {content} 推断完成: is_jargon={is_jargon}, meaning={jargon_obj.meaning}, last_inference_count={jargon_obj.last_inference_count}, is_complete={jargon_obj.is_complete}"

@@ -1,9 +1,9 @@
 import re
 import json
-import traceback
 from typing import Union
 
 from src.common.database.database_model import Messages, Images
+from src.common.data_models.database_data_model import DatabaseMessages
 from src.common.logger import get_logger
 from .chat_stream import ChatStream
 from .message import MessageSending, MessageRecv
@@ -30,116 +30,104 @@ class MessageStorage:
             return []
 
     @staticmethod
-    async def store_message(message: Union[MessageSending, MessageRecv], chat_stream: ChatStream) -> None:
-        """存储消息到数据库"""
-        try:
-            pattern = r"<MainRule>.*?</MainRule>|<schedule>.*?</schedule>|<UserMessage>.*?</UserMessage>"
+    def build_database_message(
+        message: Union[MessageSending, MessageRecv], chat_stream: ChatStream
+    ) -> DatabaseMessages:
+        """构建数据库消息对象，供运行时和持久化逻辑复用。"""
+        pattern = r"<MainRule>.*?</MainRule>|<schedule>.*?</schedule>|<UserMessage>.*?</UserMessage>"
 
-            # print(message)
+        processed_plain_text = message.processed_plain_text
+        if processed_plain_text:
+            processed_plain_text = MessageStorage.replace_image_descriptions(processed_plain_text)
+            filtered_processed_plain_text = re.sub(pattern, "", processed_plain_text, flags=re.DOTALL)
+        else:
+            filtered_processed_plain_text = ""
 
-            processed_plain_text = message.processed_plain_text
-
-            # print(processed_plain_text)
-
-            if processed_plain_text:
-                processed_plain_text = MessageStorage.replace_image_descriptions(processed_plain_text)
-                filtered_processed_plain_text = re.sub(pattern, "", processed_plain_text, flags=re.DOTALL)
-            else:
-                filtered_processed_plain_text = ""
-
-            if isinstance(message, MessageSending):
-                display_message = message.display_message
-                if display_message:
-                    filtered_display_message = re.sub(pattern, "", display_message, flags=re.DOTALL)
-                else:
-                    filtered_display_message = ""
-                interest_value = 0
-                is_mentioned = False
-                is_at = False
-                reply_probability_boost = 0.0
-                reply_to = message.reply_to
-                priority_mode = ""
-                priority_info = {}
-                is_emoji = False
-                is_picid = False
-                is_notify = False
-                is_command = False
-                key_words = ""
-                key_words_lite = ""
-                selected_expressions = message.selected_expressions
+        if isinstance(message, MessageSending):
+            display_message = message.display_message
+            if display_message:
+                filtered_display_message = re.sub(pattern, "", display_message, flags=re.DOTALL)
             else:
                 filtered_display_message = ""
-                interest_value = message.interest_value
-                is_mentioned = message.is_mentioned
-                is_at = message.is_at
-                reply_probability_boost = message.reply_probability_boost
-                reply_to = ""
-                priority_mode = message.priority_mode
-                priority_info = message.priority_info
-                is_emoji = message.is_emoji
-                is_picid = message.is_picid
-                is_notify = message.is_notify
-                is_command = message.is_command
-                # 序列化关键词列表为JSON字符串
-                key_words = MessageStorage._serialize_keywords(message.key_words)
-                key_words_lite = MessageStorage._serialize_keywords(message.key_words_lite)
-                selected_expressions = ""
+            interest_value = 0
+            is_mentioned = False
+            is_at = False
+            reply_probability_boost = 0.0
+            reply_to = message.reply_to
+            priority_mode = ""
+            priority_info = {}
+            is_emoji = False
+            is_picid = False
+            is_notify = False
+            is_command = False
+            key_words = ""
+            key_words_lite = ""
+            selected_expressions = message.selected_expressions
+        else:
+            filtered_display_message = ""
+            interest_value = message.interest_value
+            is_mentioned = message.is_mentioned
+            is_at = message.is_at
+            reply_probability_boost = message.reply_probability_boost
+            reply_to = ""
+            priority_mode = message.priority_mode
+            priority_info = message.priority_info
+            is_emoji = message.is_emoji
+            is_picid = message.is_picid
+            is_notify = message.is_notify
+            is_command = message.is_command
+            key_words = MessageStorage._serialize_keywords(message.key_words)
+            key_words_lite = MessageStorage._serialize_keywords(message.key_words_lite)
+            selected_expressions = ""
 
-            chat_info_dict = chat_stream.to_dict()
-            user_info = message.message_info.user_info  # type: ignore
-            user_info_dict = user_info.to_dict() if user_info else {}
+        chat_info_dict = chat_stream.to_dict()
+        user_info = message.message_info.user_info  # type: ignore
+        user_info_dict = user_info.to_dict() if user_info else {}
+        group_info_from_chat = chat_info_dict.get("group_info") or {}
+        user_info_from_chat = chat_info_dict.get("user_info") or {}
 
-            # message_id 现在是 TextField，直接使用字符串值
-            msg_id = message.message_info.message_id
+        return DatabaseMessages(
+            message_id=message.message_info.message_id,
+            time=float(message.message_info.time),  # type: ignore
+            chat_id=chat_stream.stream_id,
+            reply_to=reply_to,
+            is_mentioned=is_mentioned,
+            is_at=is_at,
+            reply_probability_boost=reply_probability_boost,
+            processed_plain_text=filtered_processed_plain_text,
+            display_message=filtered_display_message,
+            interest_value=interest_value,
+            priority_mode=priority_mode,
+            priority_info=priority_info,
+            is_emoji=is_emoji,
+            is_picid=is_picid,
+            is_notify=is_notify,
+            is_command=is_command,
+            key_words=key_words,
+            key_words_lite=key_words_lite,
+            selected_expressions=selected_expressions,
+            user_platform=user_info_dict.get("platform", ""),
+            user_id=user_info_dict.get("user_id", ""),
+            user_nickname=user_info_dict.get("user_nickname", ""),
+            user_cardname=user_info_dict.get("user_cardname"),
+            chat_info_stream_id=chat_info_dict.get("stream_id", ""),
+            chat_info_platform=chat_info_dict.get("platform", ""),
+            chat_info_user_platform=user_info_from_chat.get("platform", ""),
+            chat_info_user_id=user_info_from_chat.get("user_id", ""),
+            chat_info_user_nickname=user_info_from_chat.get("user_nickname", ""),
+            chat_info_user_cardname=user_info_from_chat.get("user_cardname"),
+            chat_info_group_platform=group_info_from_chat.get("platform"),
+            chat_info_group_id=group_info_from_chat.get("group_id"),
+            chat_info_group_name=group_info_from_chat.get("group_name"),
+            chat_info_create_time=float(chat_info_dict.get("create_time", 0.0)),
+            chat_info_last_active_time=float(chat_info_dict.get("last_active_time", 0.0)),
+        )
 
-            # 安全地获取 group_info, 如果为 None 则视为空字典
-            group_info_from_chat = chat_info_dict.get("group_info") or {}
-            # 安全地获取 user_info, 如果为 None 则视为空字典 (以防万一)
-            user_info_from_chat = chat_info_dict.get("user_info") or {}
-
-            Messages.create(
-                message_id=msg_id,
-                time=float(message.message_info.time),  # type: ignore
-                chat_id=chat_stream.stream_id,
-                # Flattened chat_info
-                reply_to=reply_to,
-                is_mentioned=is_mentioned,
-                is_at=is_at,
-                reply_probability_boost=reply_probability_boost,
-                chat_info_stream_id=chat_info_dict.get("stream_id"),
-                chat_info_platform=chat_info_dict.get("platform"),
-                chat_info_user_platform=user_info_from_chat.get("platform"),
-                chat_info_user_id=user_info_from_chat.get("user_id"),
-                chat_info_user_nickname=user_info_from_chat.get("user_nickname"),
-                chat_info_user_cardname=user_info_from_chat.get("user_cardname"),
-                chat_info_group_platform=group_info_from_chat.get("platform"),
-                chat_info_group_id=group_info_from_chat.get("group_id"),
-                chat_info_group_name=group_info_from_chat.get("group_name"),
-                chat_info_create_time=float(chat_info_dict.get("create_time", 0.0)),
-                chat_info_last_active_time=float(chat_info_dict.get("last_active_time", 0.0)),
-                # Flattened user_info (message sender)
-                user_platform=user_info_dict.get("platform"),
-                user_id=user_info_dict.get("user_id"),
-                user_nickname=user_info_dict.get("user_nickname"),
-                user_cardname=user_info_dict.get("user_cardname"),
-                # Text content
-                processed_plain_text=filtered_processed_plain_text,
-                display_message=filtered_display_message,
-                interest_value=interest_value,
-                priority_mode=priority_mode,
-                priority_info=priority_info,
-                is_emoji=is_emoji,
-                is_picid=is_picid,
-                is_notify=is_notify,
-                is_command=is_command,
-                key_words=key_words,
-                key_words_lite=key_words_lite,
-                selected_expressions=selected_expressions,
-            )
-        except Exception:
-            logger.exception("存储消息失败")
-            logger.error(f"消息：{message}")
-            traceback.print_exc()
+    @staticmethod
+    async def store_message(message: Union[MessageSending, MessageRecv], chat_stream: ChatStream) -> None:
+        """存储消息到数据库"""
+        db_message = MessageStorage.build_database_message(message, chat_stream)
+        Messages.create(**db_message.flatten())
 
     # 如果需要其他存储相关的函数，可以在这里添加
     @staticmethod

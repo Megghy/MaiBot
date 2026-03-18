@@ -7,6 +7,8 @@ from src.plugin_system.base.component_types import (
     ComponentType,
     ToolInfo,
 )
+from src.runtime.local_component_state import local_component_state
+from src.runtime.registries import runtime_registries
 
 
 # === 插件信息查询 ===
@@ -17,9 +19,7 @@ def get_all_plugin_info() -> Dict[str, PluginInfo]:
     Returns:
         dict: 包含所有插件信息的字典，键为插件名称，值为 PluginInfo 对象。
     """
-    from src.plugin_system.core.component_registry import component_registry
-
-    return component_registry.get_all_plugins()
+    return runtime_registries.get_all_plugins()
 
 
 def get_plugin_info(plugin_name: str) -> Optional[PluginInfo]:
@@ -32,9 +32,7 @@ def get_plugin_info(plugin_name: str) -> Optional[PluginInfo]:
     Returns:
         PluginInfo: 插件信息对象，如果插件不存在则返回 None。
     """
-    from src.plugin_system.core.component_registry import component_registry
-
-    return component_registry.get_plugin_info(plugin_name)
+    return runtime_registries.get_plugin_info(plugin_name)
 
 
 # === 组件查询方法 ===
@@ -50,9 +48,7 @@ def get_component_info(
     Returns:
         Union[CommandInfo, ActionInfo, EventHandlerInfo]: 组件信息对象，如果组件不存在则返回 None。
     """
-    from src.plugin_system.core.component_registry import component_registry
-
-    return component_registry.get_component_info(component_name, component_type)  # type: ignore
+    return runtime_registries.get_component_info(component_name, component_type)  # type: ignore
 
 
 def get_components_info_by_type(
@@ -67,9 +63,7 @@ def get_components_info_by_type(
     Returns:
         dict: 包含指定类型组件信息的字典，键为组件名称，值为对应的组件信息对象。
     """
-    from src.plugin_system.core.component_registry import component_registry
-
-    return component_registry.get_components_by_type(component_type)  # type: ignore
+    return runtime_registries.get_components_by_type(component_type)  # type: ignore
 
 
 def get_enabled_components_info_by_type(
@@ -84,9 +78,7 @@ def get_enabled_components_info_by_type(
     Returns:
         dict: 包含指定类型启用组件信息的字典，键为组件名称，值为对应的组件信息对象。
     """
-    from src.plugin_system.core.component_registry import component_registry
-
-    return component_registry.get_enabled_components_by_type(component_type)  # type: ignore
+    return runtime_registries.get_enabled_components_by_type(component_type)  # type: ignore
 
 
 # === Action 查询方法 ===
@@ -100,9 +92,7 @@ def get_registered_action_info(action_name: str) -> Optional[ActionInfo]:
     Returns:
         ActionInfo: Action 信息对象，如果 Action 不存在则返回 None。
     """
-    from src.plugin_system.core.component_registry import component_registry
-
-    return component_registry.get_registered_action_info(action_name)
+    return runtime_registries.get_registered_action_info(action_name)
 
 
 def get_registered_command_info(command_name: str) -> Optional[CommandInfo]:
@@ -115,9 +105,7 @@ def get_registered_command_info(command_name: str) -> Optional[CommandInfo]:
     Returns:
         CommandInfo: Command 信息对象，如果 Command 不存在则返回 None。
     """
-    from src.plugin_system.core.component_registry import component_registry
-
-    return component_registry.get_registered_command_info(command_name)
+    return runtime_registries.get_registered_command_info(command_name)
 
 
 def get_registered_tool_info(tool_name: str) -> Optional[ToolInfo]:
@@ -130,9 +118,7 @@ def get_registered_tool_info(tool_name: str) -> Optional[ToolInfo]:
     Returns:
         ToolInfo: Tool 信息对象，如果 Tool 不存在则返回 None。
     """
-    from src.plugin_system.core.component_registry import component_registry
-
-    return component_registry.get_registered_tool_info(tool_name)
+    return runtime_registries.get_registered_tool_info(tool_name)
 
 
 # === EventHandler 特定查询方法 ===
@@ -148,9 +134,7 @@ def get_registered_event_handler_info(
     Returns:
         EventHandlerInfo: EventHandler 信息对象，如果 EventHandler 不存在则返回 None。
     """
-    from src.plugin_system.core.component_registry import component_registry
-
-    return component_registry.get_registered_event_handler_info(event_handler_name)
+    return runtime_registries.get_registered_event_handler_info(event_handler_name)
 
 
 # === 组件管理方法 ===
@@ -165,9 +149,7 @@ def globally_enable_component(component_name: str, component_type: ComponentType
     Returns:
         bool: 启用成功返回 True，否则返回 False。
     """
-    from src.plugin_system.core.component_registry import component_registry
-
-    return component_registry.enable_component(component_name, component_type)
+    return runtime_registries.enable_component(component_name, component_type)
 
 
 async def globally_disable_component(component_name: str, component_type: ComponentType) -> bool:
@@ -183,9 +165,7 @@ async def globally_disable_component(component_name: str, component_type: Compon
     Returns:
         bool: 禁用成功返回 True，否则返回 False。
     """
-    from src.plugin_system.core.component_registry import component_registry
-
-    return await component_registry.disable_component(component_name, component_type)
+    return runtime_registries.disable_component(component_name, component_type)
 
 
 def locally_enable_component(component_name: str, component_type: ComponentType, stream_id: str) -> bool:
@@ -200,19 +180,7 @@ def locally_enable_component(component_name: str, component_type: ComponentType,
     Returns:
         bool: 启用成功返回 True，否则返回 False。
     """
-    from src.plugin_system.core.global_announcement_manager import global_announcement_manager
-
-    match component_type:
-        case ComponentType.ACTION:
-            return global_announcement_manager.enable_specific_chat_action(stream_id, component_name)
-        case ComponentType.COMMAND:
-            return global_announcement_manager.enable_specific_chat_command(stream_id, component_name)
-        case ComponentType.TOOL:
-            return global_announcement_manager.enable_specific_chat_tool(stream_id, component_name)
-        case ComponentType.EVENT_HANDLER:
-            return global_announcement_manager.enable_specific_chat_event_handler(stream_id, component_name)
-        case _:
-            raise ValueError(f"未知 component type: {component_type}")
+    return local_component_state.enable_component(stream_id, component_name, component_type)
 
 
 def locally_disable_component(component_name: str, component_type: ComponentType, stream_id: str) -> bool:
@@ -227,19 +195,7 @@ def locally_disable_component(component_name: str, component_type: ComponentType
     Returns:
         bool: 禁用成功返回 True，否则返回 False。
     """
-    from src.plugin_system.core.global_announcement_manager import global_announcement_manager
-
-    match component_type:
-        case ComponentType.ACTION:
-            return global_announcement_manager.disable_specific_chat_action(stream_id, component_name)
-        case ComponentType.COMMAND:
-            return global_announcement_manager.disable_specific_chat_command(stream_id, component_name)
-        case ComponentType.TOOL:
-            return global_announcement_manager.disable_specific_chat_tool(stream_id, component_name)
-        case ComponentType.EVENT_HANDLER:
-            return global_announcement_manager.disable_specific_chat_event_handler(stream_id, component_name)
-        case _:
-            raise ValueError(f"未知 component type: {component_type}")
+    return local_component_state.disable_component(stream_id, component_name, component_type)
 
 
 def get_locally_disabled_components(stream_id: str, component_type: ComponentType) -> list[str]:
@@ -253,16 +209,4 @@ def get_locally_disabled_components(stream_id: str, component_type: ComponentTyp
     Returns:
         list[str]: 禁用的组件名称列表。
     """
-    from src.plugin_system.core.global_announcement_manager import global_announcement_manager
-
-    match component_type:
-        case ComponentType.ACTION:
-            return global_announcement_manager.get_disabled_chat_actions(stream_id)
-        case ComponentType.COMMAND:
-            return global_announcement_manager.get_disabled_chat_commands(stream_id)
-        case ComponentType.TOOL:
-            return global_announcement_manager.get_disabled_chat_tools(stream_id)
-        case ComponentType.EVENT_HANDLER:
-            return global_announcement_manager.get_disabled_chat_event_handlers(stream_id)
-        case _:
-            raise ValueError(f"未知 component type: {component_type}")
+    return local_component_state.get_disabled_components(stream_id, component_type)

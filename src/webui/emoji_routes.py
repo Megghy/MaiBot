@@ -7,7 +7,6 @@ from typing import Optional, List
 from src.common.logger import get_logger
 from src.common.database.database_model import Emoji
 from .token_manager import get_token_manager
-import json
 import time
 import os
 

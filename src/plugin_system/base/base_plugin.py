@@ -68,7 +68,7 @@ class BasePlugin(PluginBase):
         self.plugin_info.components = registered_components
 
         # 注册插件
-        if component_registry.register_plugin(self.plugin_info):
+        if component_registry.register_plugin(self.plugin_info, self.config):
             logger.debug(f"{self.log_prefix} 插件注册成功，包含 {len(registered_components)} 个组件")
             return True
         else:

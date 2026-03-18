@@ -249,18 +249,14 @@ class MemoryForgetTask(AsyncTask):
         deleted_count = 0
         if to_delete_ids:
             try:
-                deleted_count = (
-                    ChatHistory.delete().where(ChatHistory.id.in_(to_delete_ids)).execute()
-                )
+                deleted_count = ChatHistory.delete().where(ChatHistory.id.in_(to_delete_ids)).execute()
             except Exception as e:
                 logger.error(f"[记忆遗忘-阶段{stage_label}] 批量删除记录失败: {e}")
 
         remaining = [r for r in candidates if r.id not in to_delete_ids]
         if remaining:
             ids_to_update = [r.id for r in remaining]
-            ChatHistory.update(forget_times=next_forget_times).where(
-                ChatHistory.id.in_(ids_to_update)
-            ).execute()
+            ChatHistory.update(forget_times=next_forget_times).where(ChatHistory.id.in_(ids_to_update)).execute()
 
         logger.info(
             f"[记忆遗忘-阶段{stage_label}] 完成：删除了 {deleted_count} 条记忆，"

@@ -10,7 +10,7 @@ from src.config.config import global_config, model_config
 from src.common.logger import get_logger
 from src.common.database.database_model import Expression
 from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
-from src.express.express_utils import weighted_sample, weighted_sample_no_replacement
+from src.express.express_utils import weighted_sample_no_replacement
 
 logger = get_logger("expression_selector")
 
@@ -131,15 +131,19 @@ class ExpressionSelector:
             related_chat_ids = self.get_related_chat_ids(chat_id)
 
             # 优化：一次性查询所有相关chat_id的表达方式，使用dicts()减少对象创建开销
-            style_query = Expression.select(
-                Expression.id,
-                Expression.situation,
-                Expression.style,
-                Expression.last_active_time,
-                Expression.chat_id,
-                Expression.create_date,
-                Expression.count
-            ).where((Expression.chat_id.in_(related_chat_ids))).dicts()
+            style_query = (
+                Expression.select(
+                    Expression.id,
+                    Expression.situation,
+                    Expression.style,
+                    Expression.last_active_time,
+                    Expression.chat_id,
+                    Expression.create_date,
+                    Expression.count,
+                )
+                .where((Expression.chat_id.in_(related_chat_ids)))
+                .dicts()
+            )
 
             style_exprs = []
             for expr in style_query:
@@ -147,9 +151,9 @@ class ExpressionSelector:
                 expr["source_id"] = expr["chat_id"]
                 # 处理可能为None的字段
                 if expr.get("create_date") is None:
-                     expr["create_date"] = expr.get("last_active_time")
+                    expr["create_date"] = expr.get("last_active_time")
                 if expr.get("count") is None:
-                     expr["count"] = 1
+                    expr["count"] = 1
                 style_exprs.append(expr)
 
             # 随机抽样
@@ -160,7 +164,6 @@ class ExpressionSelector:
                 selected_style = self._ensure_fresh_coverage(selected_style, style_exprs, total_num)
             else:
                 selected_style = []
-
 
             logger.info(f"随机选择，为聊天室 {chat_id} 选择了 {len(selected_style)} 个表达方式")
             return selected_style
@@ -365,14 +368,16 @@ class ExpressionSelector:
             key = (source_id, situation, style)
             if key not in updates_by_key:
                 updates_by_key[key] = expr
-        
+
         try:
             # 使用事务批量处理
             with Expression._meta.database.atomic():
                 current_time_val = time.time()
                 for chat_id, situation, style in updates_by_key:
                     query = Expression.select().where(
-                        (Expression.chat_id == chat_id) & (Expression.situation == situation) & (Expression.style == style)
+                        (Expression.chat_id == chat_id)
+                        & (Expression.situation == situation)
+                        & (Expression.style == style)
                     )
                     if query.exists():
                         expr_obj = query.get()

@@ -1,0 +1,12 @@
+# MaiBot 项目概览
+- 目的：基于大语言模型的交互式智能体/聊天机器人，包含聊天回复、情绪、表情、记忆、知识检索、插件系统和可选 WebUI。
+- 技术栈：Python 3.10+，FastAPI/Uvicorn，Peewee，Pydantic，OpenAI/Google GenAI，FAISS，aiohttp，structlog/rich 风格日志。
+- 主入口：根目录 `bot.py`，内部构造 `src.main.MainSystem`；`src/main.py` 负责系统初始化、消息 API、HTTP 服务和 WebUI 任务调度。
+- 核心结构：
+  - `src/chat`：消息接收、聊天流、心流/脑聊循环、回复生成、动作规划。
+  - `src/plugin_system`：插件基类、组件注册中心、事件系统、对外 API facade。
+  - `src/plugins`：内置插件实现。
+  - `src/memory_system`：记忆检索与写入、检索工具注册。
+  - `src/common`：数据库、消息 API、HTTP Server、日志、通用模型。
+  - `src/webui`：独立 WebUI 服务及路由。
+- 架构特征：大量全局单例/全局 getter（如 `get_global_api`、`get_global_server`、`get_chat_manager`、`plugin_manager`、`events_manager`），消息主线依赖这些全局对象串接。

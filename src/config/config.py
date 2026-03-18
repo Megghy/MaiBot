@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 from tomlkit import TOMLDocument
 from tomlkit.items import Table, KeyType
-from dataclasses import field, dataclass
+from dataclasses import dataclass, field, fields as dataclass_fields
 from rich.traceback import install
 from typing import List, Optional
 
@@ -453,6 +453,60 @@ def api_ada_load_config(config_path: str) -> APIAdapterConfig:
     except Exception as e:
         logger.critical("API适配器配置文件解析失败")
         raise e
+
+
+def _sync_config_value_in_place(current_value, new_value):
+    if isinstance(current_value, ConfigBase) and isinstance(new_value, ConfigBase):
+        _sync_config_object_in_place(current_value, new_value)
+        return current_value
+
+    if isinstance(current_value, list) and isinstance(new_value, list):
+        current_value.clear()
+        current_value.extend(new_value)
+        return current_value
+
+    if isinstance(current_value, dict) and isinstance(new_value, dict):
+        current_value.clear()
+        current_value.update(new_value)
+        return current_value
+
+    if isinstance(current_value, set) and isinstance(new_value, set):
+        current_value.clear()
+        current_value.update(new_value)
+        return current_value
+
+    return new_value
+
+
+def _sync_config_object_in_place(current_config: ConfigBase, new_config: ConfigBase) -> ConfigBase:
+    for config_field in dataclass_fields(new_config):
+        field_name = config_field.name
+        if field_name.startswith("_"):
+            continue
+
+        old_value = getattr(current_config, field_name)
+        new_value = getattr(new_config, field_name)
+        synced_value = _sync_config_value_in_place(old_value, new_value)
+        if synced_value is not old_value:
+            setattr(current_config, field_name, synced_value)
+
+    if isinstance(current_config, APIAdapterConfig):
+        current_config.__post_init__()
+    return current_config
+
+
+def reload_bot_config_in_place(config_path: Optional[str] = None) -> Config:
+    target_path = config_path or os.path.join(CONFIG_DIR, "bot_config.toml")
+    updated_config = load_config(target_path)
+    _sync_config_object_in_place(global_config, updated_config)
+    return global_config
+
+
+def reload_model_config_in_place(config_path: Optional[str] = None) -> APIAdapterConfig:
+    target_path = config_path or os.path.join(CONFIG_DIR, "model_config.toml")
+    updated_config = api_ada_load_config(target_path)
+    _sync_config_object_in_place(model_config, updated_config)
+    return model_config
 
 
 # 获取配置文件路径

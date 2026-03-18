@@ -1,6 +1,6 @@
 from typing import List, Tuple, Type, Optional
-from src.plugin_system import BasePlugin, register_plugin, BaseCommand, ComponentInfo, ConfigField
 from src.plugin_system.apis import send_api, frequency_api
+from src.plugin_system.base import BaseCommand, BasePlugin, ComponentInfo, ConfigField
 
 
 class SetTalkFrequencyCommand(BaseCommand):
@@ -101,7 +101,6 @@ Talk Value (发言频率):
 # ===== 插件注册 =====
 
 
-@register_plugin
 class BetterFrequencyPlugin(BasePlugin):
     """BetterFrequency插件 - 控制聊天频率的插件"""
 
@@ -142,3 +141,6 @@ class BetterFrequencyPlugin(BasePlugin):
             )
 
         return components
+
+
+PLUGIN_CLASS = BetterFrequencyPlugin

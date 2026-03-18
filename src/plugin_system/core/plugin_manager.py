@@ -1,491 +1,315 @@
-import os
-import traceback
+from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple, Type, Any
-from importlib.util import spec_from_file_location, module_from_spec
+import sys
+from importlib.util import module_from_spec, spec_from_file_location
+from inspect import getfile
 from pathlib import Path
-
+from types import ModuleType
+from typing import Any, Iterable, Optional, Tuple, Type
 
 from src.common.logger import get_logger
 from src.plugin_system.base.plugin_base import PluginBase
-from src.plugin_system.base.component_types import ComponentType
 from src.plugin_system.utils.manifest_utils import VersionComparator
+
 from .component_registry import component_registry
 
 logger = get_logger("plugin_manager")
 
 
 class PluginManager:
+    """插件加载器。
+
+    活动注册数据已经进入 runtime registries，这里只保留：
+    - 插件类发现与实例化
+    - 外部插件目录扫描
+    - 运行期加载/卸载/重载接口
+
+    外部插件约定：
+    - 每个插件包包含 `plugin.py`
+    - `plugin.py` 必须显式导出 `PLUGIN_CLASS`
     """
-    插件管理器类
 
-    负责加载，重载和卸载插件，同时管理插件的所有组件
-    """
+    def __init__(self, plugin_directories: Iterable[str] | None = None) -> None:
+        self.built_in_root = Path("src/plugins/built_in").resolve()
+        self.plugin_directories: list[str] = []
+        self.plugin_classes: dict[str, Type[PluginBase]] = {}
+        self.plugin_paths: dict[str, str] = {}
+        self.loaded_plugins: dict[str, PluginBase] = {}
+        self.failed_plugins: dict[str, str] = {}
 
-    def __init__(self):
-        self.plugin_directories: List[str] = []  # 插件根目录列表
-        self.plugin_classes: Dict[str, Type[PluginBase]] = {}  # 全局插件类注册表，插件名 -> 插件类
-        self.plugin_paths: Dict[str, str] = {}  # 记录插件名到目录路径的映射，插件名 -> 目录路径
-
-        self.loaded_plugins: Dict[str, PluginBase] = {}  # 已加载的插件类实例注册表，插件名 -> 插件类实例
-        self.failed_plugins: Dict[str, str] = {}  # 记录加载失败的插件文件及其错误信息，插件名 -> 错误信息
-
-        # 确保插件目录存在
-        self._ensure_plugin_directories()
+        self._ensure_plugin_directories(["plugins"] if plugin_directories is None else plugin_directories)
         logger.info("插件管理器初始化完成")
 
-    # === 插件目录管理 ===
-
     def add_plugin_directory(self, directory: str) -> bool:
-        """添加插件目录"""
-        if os.path.exists(directory):
-            if directory not in self.plugin_directories:
-                self.plugin_directories.append(directory)
-                logger.debug(f"已添加插件目录: {directory}")
-                return True
-            else:
-                logger.warning(f"插件不可重复加载: {directory}")
-        else:
+        resolved = str(Path(directory).resolve())
+        if not Path(resolved).exists():
             logger.warning(f"插件目录不存在: {directory}")
-        return False
+            return False
+        if resolved in self.plugin_directories:
+            logger.warning(f"插件目录已存在: {resolved}")
+            return False
+        self.plugin_directories.append(resolved)
+        logger.debug(f"已添加插件目录: {resolved}")
+        return True
 
-    # === 插件加载管理 ===
+    def register_plugin_class(self, plugin_class: Type[PluginBase], *, plugin_dir: str | None = None) -> str:
+        if not issubclass(plugin_class, PluginBase):
+            raise TypeError(f"{plugin_class.__name__} 不是 PluginBase 的子类")
+
+        plugin_name = plugin_class.plugin_name  # type: ignore[attr-defined]
+        if not plugin_name:
+            raise ValueError(f"插件类 {plugin_class.__name__} 缺少 plugin_name")
+        if "." in plugin_name:
+            raise ValueError(f"插件名称 '{plugin_name}' 包含非法字符 '.'，请使用下划线替代")
+
+        resolved_dir = Path(plugin_dir or self._resolve_plugin_dir(plugin_class)).resolve()
+        self.plugin_classes[plugin_name] = plugin_class
+        self.plugin_paths[plugin_name] = str(resolved_dir)
+        logger.debug(f"插件类已注册: {plugin_name}, 路径: {resolved_dir}")
+        return plugin_name
+
+    def load_builtin_plugins(self, plugin_classes: Iterable[Type[PluginBase]]) -> Tuple[int, int]:
+        plugin_names = [self.register_plugin_class(plugin_class) for plugin_class in plugin_classes]
+        return self._load_registered_plugins(plugin_names)
 
     def load_all_plugins(self) -> Tuple[int, int]:
-        """加载所有插件
-
-        Returns:
-            tuple[int, int]: (插件数量, 组件数量)
-        """
-        logger.debug("开始加载所有插件...")
-
-        # 第一阶段：加载所有插件模块（注册插件类）
-        total_loaded_modules = 0
-        total_failed_modules = 0
-
-        for directory in self.plugin_directories:
-            loaded, failed = self._load_plugin_modules_from_directory(directory)
-            total_loaded_modules += loaded
-            total_failed_modules += failed
-
-        logger.debug(f"插件模块加载完成 - 成功: {total_loaded_modules}, 失败: {total_failed_modules}")
-
-        total_registered = 0
-        total_failed_registration = 0
-
-        for plugin_name in self.plugin_classes.keys():
-            load_status, count = self.load_registered_plugin_classes(plugin_name)
-            if load_status:
-                total_registered += 1
-            else:
-                total_failed_registration += count
-
-        self._show_stats(total_registered, total_failed_registration)
-
-        return total_registered, total_failed_registration
+        discovered, failed = self.rescan_plugin_directory()
+        loaded, registration_failed = self._load_registered_plugins(self.list_registered_plugins())
+        self._show_stats(
+            discovered=discovered, import_failed=failed, loaded=loaded, registration_failed=registration_failed
+        )
+        return loaded, failed + registration_failed
 
     def load_registered_plugin_classes(self, plugin_name: str) -> Tuple[bool, int]:
-        # sourcery skip: extract-duplicate-method, extract-method
-        """
-        加载已经注册的插件类
-        """
+        if plugin_name in self.loaded_plugins:
+            return True, 0
+
         plugin_class = self.plugin_classes.get(plugin_name)
-        if not plugin_class:
-            logger.error(f"插件 {plugin_name} 的插件类未注册或不存在")
+        if plugin_class is None:
+            logger.error(f"插件 {plugin_name} 的插件类未注册")
             return False, 1
+
+        plugin_dir = self.plugin_paths.get(plugin_name)
+        if not plugin_dir:
+            logger.error(f"插件 {plugin_name} 缺少插件目录")
+            return False, 1
+
         try:
-            # 使用记录的插件目录路径
-            plugin_dir = self.plugin_paths.get(plugin_name)
+            plugin_instance = plugin_class(plugin_dir=plugin_dir)
+            plugin_instance.plugin_info.is_built_in = self._is_built_in_path(plugin_dir)
 
-            # 如果没有记录，直接返回失败
-            if not plugin_dir:
-                return False, 1
-
-            plugin_instance = plugin_class(plugin_dir=plugin_dir)  # 实例化插件（可能因为缺少manifest而失败）
-            if not plugin_instance:
-                logger.error(f"插件 {plugin_name} 实例化失败")
-                return False, 1
-            # 检查插件是否启用
             if not plugin_instance.enable_plugin:
                 logger.info(f"插件 {plugin_name} 已禁用，跳过加载")
                 return False, 0
 
-            # 检查版本兼容性
-            is_compatible, compatibility_error = self._check_plugin_version_compatibility(
-                plugin_name, plugin_instance.manifest_data
+            compatible, error_message = self._check_plugin_version_compatibility(
+                plugin_name,
+                plugin_instance.manifest_data,
             )
-            if not is_compatible:
-                self.failed_plugins[plugin_name] = compatibility_error
-                logger.error(f"❌ 插件加载失败: {plugin_name} - {compatibility_error}")
+            if not compatible:
+                self.failed_plugins[plugin_name] = error_message
+                logger.error(f"插件加载失败: {plugin_name} - {error_message}")
                 return False, 1
-            if plugin_instance.register_plugin():
-                self.loaded_plugins[plugin_name] = plugin_instance
-                self._show_plugin_components(plugin_name)
-                return True, 1
-            else:
+
+            if not plugin_instance.register_plugin():
                 self.failed_plugins[plugin_name] = "插件注册失败"
-                logger.error(f"❌ 插件注册失败: {plugin_name}")
+                logger.error(f"插件注册失败: {plugin_name}")
                 return False, 1
 
-        except FileNotFoundError as e:
-            # manifest文件缺失
-            error_msg = f"缺少manifest文件: {str(e)}"
-            self.failed_plugins[plugin_name] = error_msg
-            logger.error(f"❌ 插件加载失败: {plugin_name} - {error_msg}")
-            return False, 1
+            self.loaded_plugins[plugin_name] = plugin_instance
+            self.failed_plugins.pop(plugin_name, None)
+            self._show_plugin_components(plugin_name)
+            return True, 1
+        except FileNotFoundError as exc:
+            error_message = f"缺少 manifest 文件: {exc}"
+        except ValueError as exc:
+            error_message = f"manifest 验证失败: {exc}"
+        except Exception as exc:  # pragma: no cover - 启动边界日志
+            error_message = f"未知错误: {exc}"
+            logger.exception(f"插件加载失败: {plugin_name}")
 
-        except ValueError as e:
-            # manifest文件格式错误或验证失败
-            traceback.print_exc()
-            error_msg = f"manifest验证失败: {str(e)}"
-            self.failed_plugins[plugin_name] = error_msg
-            logger.error(f"❌ 插件加载失败: {plugin_name} - {error_msg}")
-            return False, 1
-
-        except Exception as e:
-            # 其他错误
-            error_msg = f"未知错误: {str(e)}"
-            self.failed_plugins[plugin_name] = error_msg
-            logger.error(f"❌ 插件加载失败: {plugin_name} - {error_msg}")
-            logger.debug("详细错误信息: ", exc_info=True)
-            return False, 1
+        self.failed_plugins[plugin_name] = error_message
+        logger.error(f"插件加载失败: {plugin_name} - {error_message}")
+        return False, 1
 
     async def remove_registered_plugin(self, plugin_name: str) -> bool:
-        """
-        禁用插件模块
-        """
         if not plugin_name:
             raise ValueError("插件名称不能为空")
-        if plugin_name not in self.loaded_plugins:
+        plugin_instance = self.loaded_plugins.get(plugin_name)
+        if plugin_instance is None:
             logger.warning(f"插件 {plugin_name} 未加载")
             return False
-        plugin_instance = self.loaded_plugins[plugin_name]
-        plugin_info = plugin_instance.plugin_info
+
         success = True
-        for component in plugin_info.components:
+        for component in plugin_instance.plugin_info.components:
             success &= await component_registry.remove_component(component.name, component.component_type, plugin_name)
         success &= component_registry.remove_plugin_registry(plugin_name)
         del self.loaded_plugins[plugin_name]
         return success
 
     async def reload_registered_plugin(self, plugin_name: str) -> bool:
-        """
-        重载插件模块
-        """
-        if not await self.remove_registered_plugin(plugin_name):
+        if plugin_name in self.loaded_plugins and not await self.remove_registered_plugin(plugin_name):
             return False
-        if not self.load_registered_plugin_classes(plugin_name)[0]:
-            return False
-        logger.debug(f"插件 {plugin_name} 重载成功")
-        return True
+        success, _ = self.load_registered_plugin_classes(plugin_name)
+        return success
 
     def rescan_plugin_directory(self) -> Tuple[int, int]:
-        """
-        重新扫描插件根目录
-        """
-        total_success = 0
-        total_fail = 0
+        discovered = 0
+        failed = 0
         for directory in self.plugin_directories:
-            if os.path.exists(directory):
-                logger.debug(f"重新扫描插件根目录: {directory}")
-                success, fail = self._load_plugin_modules_from_directory(directory)
-                total_success += success
-                total_fail += fail
-            else:
-                logger.warning(f"插件根目录不存在: {directory}")
-        return total_success, total_fail
+            current_discovered, current_failed = self._load_plugin_modules_from_directory(directory)
+            discovered += current_discovered
+            failed += current_failed
+        return discovered, failed
 
-    def get_plugin_instance(self, plugin_name: str) -> Optional["PluginBase"]:
-        """获取插件实例
-
-        Args:
-            plugin_name: 插件名称
-
-        Returns:
-            Optional[BasePlugin]: 插件实例或None
-        """
+    def get_plugin_instance(self, plugin_name: str) -> Optional[PluginBase]:
         return self.loaded_plugins.get(plugin_name)
 
-    # === 查询方法 ===
-    def list_loaded_plugins(self) -> List[str]:
-        """
-        列出所有当前加载的插件。
-
-        Returns:
-            list: 当前加载的插件名称列表。
-        """
+    def list_loaded_plugins(self) -> list[str]:
         return list(self.loaded_plugins.keys())
 
-    def list_registered_plugins(self) -> List[str]:
-        """
-        列出所有已注册的插件类。
-
-        Returns:
-            list: 已注册的插件类名称列表。
-        """
+    def list_registered_plugins(self) -> list[str]:
         return list(self.plugin_classes.keys())
 
     def get_plugin_path(self, plugin_name: str) -> Optional[str]:
-        """
-        获取指定插件的路径。
-
-        Args:
-            plugin_name: 插件名称
-
-        Returns:
-            Optional[str]: 插件目录的绝对路径，如果插件不存在则返回None。
-        """
         return self.plugin_paths.get(plugin_name)
 
-    # === 私有方法 ===
-    # == 目录管理 ==
-    def _ensure_plugin_directories(self) -> None:
-        """确保所有插件根目录存在，如果不存在则创建"""
-        default_directories = ["src/plugins/built_in", "plugins"]
+    def reset(self, *, clear_registered_classes: bool = False) -> None:
+        self.loaded_plugins.clear()
+        self.failed_plugins.clear()
+        if clear_registered_classes:
+            self.plugin_classes.clear()
+            self.plugin_paths.clear()
 
-        for directory in default_directories:
-            if not os.path.exists(directory):
-                os.makedirs(directory, exist_ok=True)
-                logger.info(f"创建插件根目录: {directory}")
-            if directory not in self.plugin_directories:
-                self.plugin_directories.append(directory)
-                logger.debug(f"已添加插件根目录: {directory}")
-            else:
-                logger.warning(f"根目录不可重复加载: {directory}")
+    def _ensure_plugin_directories(self, directories: Iterable[str]) -> None:
+        for directory in directories:
+            resolved = Path(directory).resolve()
+            resolved.mkdir(parents=True, exist_ok=True)
+            resolved_str = str(resolved)
+            if resolved_str not in self.plugin_directories:
+                self.plugin_directories.append(resolved_str)
 
-    # == 插件加载 ==
+    def _load_registered_plugins(self, plugin_names: Iterable[str]) -> Tuple[int, int]:
+        loaded = 0
+        failed = 0
+        for plugin_name in plugin_names:
+            success, count = self.load_registered_plugin_classes(plugin_name)
+            if success:
+                loaded += count
+            elif count:
+                failed += count
+        return loaded, failed
 
-    def _load_plugin_modules_from_directory(self, directory: str) -> tuple[int, int]:
-        """从指定目录加载插件模块"""
-        loaded_count = 0
-        failed_count = 0
-
-        if not os.path.exists(directory):
-            logger.warning(f"插件根目录不存在: {directory}")
+    def _load_plugin_modules_from_directory(self, directory: str) -> Tuple[int, int]:
+        directory_path = Path(directory).resolve()
+        if self._is_built_in_path(directory_path):
+            return 0, 0
+        if not directory_path.exists():
+            logger.warning(f"插件目录不存在: {directory_path}")
             return 0, 1
 
-        logger.debug(f"正在扫描插件根目录: {directory}")
+        discovered = 0
+        failed = 0
+        for item in directory_path.iterdir():
+            if not item.is_dir() or item.name.startswith(".") or item.name.startswith("__"):
+                continue
+            plugin_file = item / "plugin.py"
+            if not plugin_file.exists():
+                continue
+            if self._load_plugin_module_file(plugin_file):
+                discovered += 1
+            else:
+                failed += 1
+        return discovered, failed
 
-        # 遍历目录中的所有包
-        for item in os.listdir(directory):
-            item_path = os.path.join(directory, item)
-
-            if os.path.isdir(item_path) and not item.startswith(".") and not item.startswith("__"):
-                plugin_file = os.path.join(item_path, "plugin.py")
-                if os.path.exists(plugin_file):
-                    if self._load_plugin_module_file(plugin_file):
-                        loaded_count += 1
-                    else:
-                        failed_count += 1
-
-        return loaded_count, failed_count
-
-    def _load_plugin_module_file(self, plugin_file: str) -> bool:
-        # sourcery skip: extract-method
-        """加载单个插件模块文件
-
-        Args:
-            plugin_file: 插件文件路径
-            plugin_name: 插件名称
-            plugin_dir: 插件目录路径
-        """
-        # 生成模块名
-        plugin_path = Path(plugin_file)
-        module_name = ".".join(plugin_path.parent.parts)
-
+    def _load_plugin_module_file(self, plugin_file: Path) -> bool:
         try:
-            # 动态导入插件模块
+            try:
+                relative_parent = plugin_file.resolve().parent.relative_to(Path.cwd().resolve())
+                module_name = ".".join(relative_parent.parts)
+            except ValueError:
+                module_name = ".".join(plugin_file.resolve().parent.parts[-2:])
+
             spec = spec_from_file_location(module_name, plugin_file)
             if spec is None or spec.loader is None:
-                logger.error(f"无法创建模块规范: {plugin_file}")
-                return False
+                raise ValueError(f"无法创建模块规范: {plugin_file}")
 
             module = module_from_spec(spec)
-            module.__package__ = module_name  # 设置模块包名
+            module.__package__ = module_name
+            sys.modules[module_name] = module
             spec.loader.exec_module(module)
-
+            self._register_external_plugin_module(module, plugin_file)
             logger.debug(f"插件模块加载成功: {plugin_file}")
             return True
-
-        except Exception as e:
-            error_msg = f"加载插件模块 {plugin_file} 失败: {e}"
-            logger.error(error_msg)
-            self.failed_plugins[module_name] = error_msg
+        except Exception as exc:
+            error_message = f"加载插件模块失败: {plugin_file} - {exc}"
+            self.failed_plugins[plugin_file.parent.name] = error_message
+            logger.error(error_message)
             return False
 
-    # == 兼容性检查 ==
+    def _register_external_plugin_module(self, module: ModuleType, plugin_file: Path) -> str:
+        plugin_class = getattr(module, "PLUGIN_CLASS", None)
+        if plugin_class is None:
+            raise ValueError(f"插件模块必须导出 PLUGIN_CLASS: {plugin_file}")
+        return self.register_plugin_class(plugin_class, plugin_dir=str(plugin_file.parent))
 
-    def _check_plugin_version_compatibility(self, plugin_name: str, manifest_data: Dict[str, Any]) -> Tuple[bool, str]:
-        """检查插件版本兼容性
+    def _resolve_plugin_dir(self, plugin_class: Type[PluginBase]) -> str:
+        try:
+            return str(Path(getfile(plugin_class)).resolve().parent)
+        except TypeError:
+            module = sys.modules.get(plugin_class.__module__)
+            module_file = getattr(module, "__file__", None) if module is not None else None
+            if module_file:
+                return str(Path(module_file).resolve().parent)
+            raise
 
-        Args:
-            plugin_name: 插件名称
-            manifest_data: manifest数据
-
-        Returns:
-            Tuple[bool, str]: (是否兼容, 错误信息)
-        """
-        if "host_application" not in manifest_data:
-            return True, ""  # 没有版本要求，默认兼容
-
-        host_app = manifest_data["host_application"]
+    def _check_plugin_version_compatibility(self, plugin_name: str, manifest_data: dict[str, Any]) -> Tuple[bool, str]:
+        host_app = manifest_data.get("host_application")
         if not isinstance(host_app, dict):
             return True, ""
 
         min_version = host_app.get("min_version", "")
         max_version = host_app.get("max_version", "")
-
         if not min_version and not max_version:
-            return True, ""  # 没有版本要求，默认兼容
+            return True, ""
 
         try:
             current_version = VersionComparator.get_current_host_version()
-            is_compatible, error_msg = VersionComparator.is_version_in_range(current_version, min_version, max_version)
-            if not is_compatible:
-                return False, f"版本不兼容: {error_msg}"
-            logger.debug(f"插件 {plugin_name} 版本兼容性检查通过")
-            return True, ""
+            compatible, error_message = VersionComparator.is_version_in_range(current_version, min_version, max_version)
+            if compatible:
+                return True, ""
+            return False, f"版本不兼容: {error_message}"
+        except Exception as exc:
+            logger.warning(f"插件 {plugin_name} 版本兼容性检查失败: {exc}")
+            return False, f"插件 {plugin_name} 版本兼容性检查失败: {exc}"
 
-        except Exception as e:
-            logger.warning(f"插件 {plugin_name} 版本兼容性检查失败: {e}")
-            return False, f"插件 {plugin_name} 版本兼容性检查失败: {e}"  # 检查失败时默认不允许加载
+    def _is_built_in_path(self, plugin_path: str | Path) -> bool:
+        try:
+            return Path(plugin_path).resolve().is_relative_to(self.built_in_root)
+        except ValueError:
+            return False
 
-    # == 显示统计与插件信息 ==
-
-    def _show_stats(self, total_registered: int, total_failed_registration: int):
-        # sourcery skip: low-code-quality
-        # 获取组件统计信息
+    def _show_stats(self, *, discovered: int, import_failed: int, loaded: int, registration_failed: int) -> None:
         stats = component_registry.get_registry_stats()
-        action_count = stats.get("action_components", 0)
-        command_count = stats.get("command_components", 0)
-        tool_count = stats.get("tool_components", 0)
-        event_handler_count = stats.get("event_handlers", 0)
-        total_components = stats.get("total_components", 0)
-
-        # 📋 显示插件加载总览
-        if total_registered > 0:
-            logger.info("🎉 插件系统加载完成!")
-            logger.info(
-                f"📊 总览: {total_registered}个插件, {total_components}个组件 (Action: {action_count}, Command: {command_count}, Tool: {tool_count}, EventHandler: {event_handler_count})"
-            )
-
-            # 显示详细的插件列表
-            logger.info("📋 已加载插件详情:")
-            for plugin_name in self.loaded_plugins.keys():
-                if plugin_info := component_registry.get_plugin_info(plugin_name):
-                    # 插件基本信息
-                    version_info = f"v{plugin_info.version}" if plugin_info.version else ""
-                    author_info = f"by {plugin_info.author}" if plugin_info.author else "unknown"
-                    license_info = f"[{plugin_info.license}]" if plugin_info.license else ""
-                    info_parts = [part for part in [version_info, author_info, license_info] if part]
-                    extra_info = f" ({', '.join(info_parts)})" if info_parts else ""
-
-                    logger.info(f"  📦 {plugin_info.display_name}{extra_info}")
-
-                    # Manifest信息
-                    if plugin_info.manifest_data:
-                        """
-                        if plugin_info.keywords:
-                            logger.info(f"    🏷️ 关键词: {', '.join(plugin_info.keywords)}")
-                        if plugin_info.categories:
-                            logger.info(f"    📁 分类: {', '.join(plugin_info.categories)}")
-                        """
-                        if plugin_info.homepage_url:
-                            logger.info(f"    🌐 主页: {plugin_info.homepage_url}")
-
-                    # 组件列表
-                    if plugin_info.components:
-                        action_components = [
-                            c for c in plugin_info.components if c.component_type == ComponentType.ACTION
-                        ]
-                        command_components = [
-                            c for c in plugin_info.components if c.component_type == ComponentType.COMMAND
-                        ]
-                        tool_components = [c for c in plugin_info.components if c.component_type == ComponentType.TOOL]
-                        event_handler_components = [
-                            c for c in plugin_info.components if c.component_type == ComponentType.EVENT_HANDLER
-                        ]
-
-                        if action_components:
-                            action_names = [c.name for c in action_components]
-                            logger.info(f"    🎯 Action组件: {', '.join(action_names)}")
-
-                        if command_components:
-                            command_names = [c.name for c in command_components]
-                            logger.info(f"    ⚡ Command组件: {', '.join(command_names)}")
-                        if tool_components:
-                            tool_names = [c.name for c in tool_components]
-                            logger.info(f"    🛠️ Tool组件: {', '.join(tool_names)}")
-                        if event_handler_components:
-                            event_handler_names = [c.name for c in event_handler_components]
-                            logger.info(f"    📢 EventHandler组件: {', '.join(event_handler_names)}")
-
-                    # 依赖信息
-                    if plugin_info.dependencies:
-                        logger.info(f"    🔗 依赖: {', '.join(plugin_info.dependencies)}")
-
-                    # 配置文件信息
-                    if plugin_info.config_file:
-                        config_status = "✅" if self.plugin_paths.get(plugin_name) else "❌"
-                        logger.info(f"    ⚙️ 配置: {plugin_info.config_file} {config_status}")
-
-            root_path = Path(__file__)
-
-            # 查找项目根目录
-            while not (root_path / "pyproject.toml").exists() and root_path.parent != root_path:
-                root_path = root_path.parent
-
-            # 显示目录统计
-            logger.info("📂 加载目录统计:")
-            for directory in self.plugin_directories:
-                if os.path.exists(directory):
-                    plugins_in_dir = []
-                    for plugin_name in self.loaded_plugins.keys():
-                        plugin_path = self.plugin_paths.get(plugin_name, "")
-                        if (
-                            Path(plugin_path)
-                            .resolve()
-                            .is_relative_to(Path(os.path.join(str(root_path), directory)).resolve())
-                        ):
-                            plugins_in_dir.append(plugin_name)
-
-                    if plugins_in_dir:
-                        logger.info(f" 📁 {directory}: {len(plugins_in_dir)}个插件 ({', '.join(plugins_in_dir)})")
-                    else:
-                        logger.info(f" 📁 {directory}: 0个插件")
-
-            # 失败信息
-            if total_failed_registration > 0:
-                logger.info(f"⚠️  失败统计: {total_failed_registration}个插件加载失败")
-                for failed_plugin, error in self.failed_plugins.items():
-                    logger.info(f"  ❌ {failed_plugin}: {error}")
-        else:
-            logger.warning("😕 没有成功加载任何插件")
+        logger.info(
+            "插件启动完成: "
+            f"发现 {discovered} 个外部插件包, 导入失败 {import_failed}, "
+            f"本轮加载 {loaded}, 注册失败 {registration_failed}, "
+            f"当前共 {stats['plugins']} 个插件 / {stats['total_components']} 个组件"
+        )
+        if self.failed_plugins:
+            for plugin_name, error_message in self.failed_plugins.items():
+                logger.warning(f"插件异常: {plugin_name} - {error_message}")
 
     def _show_plugin_components(self, plugin_name: str) -> None:
-        if plugin_info := component_registry.get_plugin_info(plugin_name):
-            component_types = {}
-            for comp in plugin_info.components:
-                comp_type = comp.component_type.name
-                component_types[comp_type] = component_types.get(comp_type, 0) + 1
-
-            components_str = ", ".join([f"{count}个{ctype}" for ctype, count in component_types.items()])
-
-            # 显示manifest信息
-            manifest_info = ""
-            if plugin_info.license:
-                manifest_info += f" [{plugin_info.license}]"
-            if plugin_info.keywords:
-                manifest_info += f" 关键词: {', '.join(plugin_info.keywords[:3])}"  # 只显示前3个关键词
-                if len(plugin_info.keywords) > 3:
-                    manifest_info += "..."
-
-            logger.info(
-                f"✅ 插件加载成功: {plugin_name} v{plugin_info.version} ({components_str}){manifest_info} - {plugin_info.description}"
-            )
-        else:
-            logger.info(f"✅ 插件加载成功: {plugin_name}")
+        plugin_info = component_registry.get_plugin_info(plugin_name)
+        if plugin_info is None:
+            logger.info(f"插件加载成功: {plugin_name}")
+            return
+        logger.info(
+            f"插件加载成功: {plugin_info.display_name or plugin_name} "
+            f"(built-in={plugin_info.is_built_in}, components={len(plugin_info.components)})"
+        )
 
 
-# 全局插件管理器实例
 plugin_manager = PluginManager()

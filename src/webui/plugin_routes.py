@@ -830,7 +830,6 @@ async def update_plugin(request: UpdatePluginRequest, authorization: Optional[st
         # 2. 读取旧版本信息
         manifest_path = plugin_path / "_manifest.json"
         old_version = "unknown"
-        plugin_name = request.plugin_id
 
         if manifest_path.exists():
             try:

@@ -1,0 +1,11 @@
+# 建议命令（Windows / PowerShell）
+- 安装依赖：`pip install -r requirements.txt`
+- 启动主程序：`python bot.py`
+- 仅运行源码主入口（备选）：`python -m src.main`
+- Lint：`ruff check .`
+- 自动修复 + Lint：`ruff check . --fix`
+- 格式化：`ruff format .`
+- 预提交：`pre-commit run --all-files`
+- 搜索代码：`rg <pattern> src`
+- 列出文件：`rg --files src`
+- 测试：仓库当前未发现标准 `tests/` 目录或 pytest 用例；若要验证，多依赖定向脚本/启动验证。

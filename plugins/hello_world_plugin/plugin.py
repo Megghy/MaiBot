@@ -1,8 +1,8 @@
 import random
 from typing import List, Tuple, Type, Any
-from src.plugin_system import (
+from src.plugin_system.apis import emoji_api
+from src.plugin_system.base import (
     BasePlugin,
-    register_plugin,
     BaseAction,
     BaseCommand,
     BaseTool,
@@ -14,7 +14,6 @@ from src.plugin_system import (
     MaiMessages,
     ToolParamType,
     ReplyContentType,
-    emoji_api,
 )
 from src.config.config import global_config
 
@@ -220,7 +219,6 @@ class RandomEmojis(BaseCommand):
 # ===== 插件注册 =====
 
 
-@register_plugin
 class HelloWorldPlugin(BasePlugin):
     """Hello World插件 - 你的第一个MaiCore插件"""
 
@@ -262,7 +260,10 @@ class HelloWorldPlugin(BasePlugin):
         ]
 
 
-# @register_plugin
+PLUGIN_CLASS = HelloWorldPlugin
+
+
+# PLUGIN_CLASS = HelloWorldEventPlugin
 # class HelloWorldEventPlugin(BaseEPlugin):
 #     """Hello World事件插件 - 处理问候和告别事件"""
 

@@ -1,51 +1,29 @@
 import asyncio
 import time
-import traceback
 import random
-from typing import List, Optional, Dict, Any, Tuple, TYPE_CHECKING
+import traceback
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from rich.traceback import install
 
 from src.config.config import global_config
 from src.common.logger import get_logger
 from src.common.data_models.info_data_model import ActionPlannerInfo
 from src.common.data_models.message_data_model import ReplyContentType
-from src.chat.message_receive.chat_stream import ChatStream, get_chat_manager
 from src.chat.utils.prompt_builder import global_prompt_manager
 from src.chat.utils.timer_calculator import Timer
 from src.chat.brain_chat.brain_planner import BrainPlanner
 from src.chat.planner_actions.action_modifier import ActionModifier
 from src.chat.planner_actions.action_manager import ActionManager
-from src.chat.heart_flow.hfc_utils import CycleDetail
 from src.express.expression_learner import expression_learner_manager
 from src.person_info.person_info import Person
 from src.plugin_system.base.component_types import EventType, ActionInfo
-from src.plugin_system.core import events_manager
 from src.plugin_system.apis import generator_api, send_api, message_api, database_api
-from src.chat.utils.chat_message_builder import (
-    build_readable_messages_with_id,
-    get_raw_msg_before_timestamp_with_chat,
-)
+from src.runtime import events_manager
+from src.runtime.chat_controller import BaseChatController
 
 if TYPE_CHECKING:
     from src.common.data_models.database_data_model import DatabaseMessages
     from src.common.data_models.message_data_model import ReplySetModel
-
-
-ERROR_LOOP_INFO = {
-    "loop_plan_info": {
-        "action_result": {
-            "action_type": "error",
-            "action_data": {},
-            "reasoning": "循环处理失败",
-        },
-    },
-    "loop_action_info": {
-        "action_taken": False,
-        "reply_text": "",
-        "command": "",
-        "taken_time": time.time(),
-    },
-}
 
 
 install(extra_lines=3)
@@ -55,7 +33,7 @@ install(extra_lines=3)
 logger = get_logger("bc")  # Logger Name Changed
 
 
-class BrainChatting:
+class BrainChatting(BaseChatController):
     """
     管理一个连续的私聊Brain Chat循环
     用于在特定聊天流中生成回复。
@@ -70,78 +48,12 @@ class BrainChatting:
             on_stop_focus_chat: 当收到stop_focus_chat命令时调用的回调函数
             performance_version: 性能记录版本号，用于区分不同启动版本
         """
-        # 基础属性
-        self.stream_id: str = chat_id  # 聊天流ID
-        self.chat_stream: ChatStream = get_chat_manager().get_stream(self.stream_id)  # type: ignore
-        if not self.chat_stream:
-            raise ValueError(f"无法找到聊天流: {self.stream_id}")
-        self.log_prefix = f"[{get_chat_manager().get_stream_name(self.stream_id) or self.stream_id}]"
-
+        super().__init__(chat_id)
         self.expression_learner = expression_learner_manager.get_expression_learner(self.stream_id)
-
         self.action_manager = ActionManager()
         self.action_planner = BrainPlanner(chat_id=self.stream_id, action_manager=self.action_manager)
         self.action_modifier = ActionModifier(action_manager=self.action_manager, chat_id=self.stream_id)
-
-        # 循环控制内部状态
-        self.running: bool = False
-        self._loop_task: Optional[asyncio.Task] = None  # 主循环任务
-
-        # 添加循环信息管理相关的属性
-        self.history_loop: List[CycleDetail] = []
-        self._cycle_counter = 0
-        self._current_cycle_detail: CycleDetail = None  # type: ignore
-
-        self.last_read_time = time.time() - 2
-
         self.more_plan = False
-
-    async def start(self):
-        """检查是否需要启动主循环，如果未激活则启动。"""
-
-        # 如果循环已经激活，直接返回
-        if self.running:
-            logger.debug(f"{self.log_prefix} BrainChatting 已激活，无需重复启动")
-            return
-
-        try:
-            # 标记为活动状态，防止重复启动
-            self.running = True
-
-            self._loop_task = asyncio.create_task(self._main_chat_loop())
-            self._loop_task.add_done_callback(self._handle_loop_completion)
-            logger.info(f"{self.log_prefix} BrainChatting 启动完成")
-
-        except Exception as e:
-            # 启动失败时重置状态
-            self.running = False
-            self._loop_task = None
-            logger.error(f"{self.log_prefix} BrainChatting 启动失败: {e}")
-            raise
-
-    def _handle_loop_completion(self, task: asyncio.Task):
-        """当 _hfc_loop 任务完成时执行的回调。"""
-        try:
-            if exception := task.exception():
-                logger.error(f"{self.log_prefix} BrainChatting: 脱离了聊天(异常): {exception}")
-                logger.error(traceback.format_exc())  # Log full traceback for exceptions
-            else:
-                logger.info(f"{self.log_prefix} BrainChatting: 脱离了聊天 (外部停止)")
-        except asyncio.CancelledError:
-            logger.info(f"{self.log_prefix} BrainChatting: 结束了聊天")
-
-    def start_cycle(self) -> Tuple[Dict[str, float], str]:
-        self._cycle_counter += 1
-        self._current_cycle_detail = CycleDetail(self._cycle_counter)
-        self._current_cycle_detail.thinking_id = f"tid{str(round(time.time(), 2))}"
-        cycle_timers = {}
-        return cycle_timers, self._current_cycle_detail.thinking_id
-
-    def end_cycle(self, loop_info, cycle_timers):
-        self._current_cycle_detail.set_loop_info(loop_info)
-        self.history_loop.append(self._current_cycle_detail)
-        self._current_cycle_detail.timers = cycle_timers
-        self._current_cycle_detail.end_time = time.time()
 
     def print_cycle_info(self, cycle_timers):
         # 记录循环信息和计时器结果
@@ -156,25 +68,12 @@ class BrainChatting:
             + (f"\n详情: {'; '.join(timer_strings)}" if timer_strings else "")
         )
 
-    async def _loopbody(self):  # sourcery skip: hoist-if-from-if
-        recent_messages_list = message_api.get_messages_by_time_in_chat(
-            chat_id=self.stream_id,
-            start_time=self.last_read_time,
-            end_time=time.time(),
-            limit=20,
-            limit_mode="latest",
-            filter_mai=True,
-            filter_command=True,
-        )
-
-        if len(recent_messages_list) >= 1:
-            self.last_read_time = time.time()
-            await self._observe(recent_messages_list=recent_messages_list)
-
-        else:
-            # Normal模式：消息数量不足，等待
-            await asyncio.sleep(0.2)
-            return True
+    async def _process_recent_messages_locked(self, recent_messages_list: List["DatabaseMessages"]) -> bool:
+        """直接处理一批新消息，供新运行时复用。"""
+        if not recent_messages_list:
+            return False
+        self.last_read_time = time.time()
+        await self._observe(recent_messages_list=recent_messages_list)
         return True
 
     async def _send_and_store_reply(
@@ -249,43 +148,24 @@ class BrainChatting:
             except Exception as e:
                 logger.error(f"{self.log_prefix} 动作修改失败: {e}")
 
-            # 执行planner
-            is_group_chat, chat_target_info, _ = self.action_planner.get_necessary_info()
-
-            message_list_before_now = get_raw_msg_before_timestamp_with_chat(
-                chat_id=self.stream_id,
-                timestamp=time.time(),
-                limit=int(global_config.chat.max_context_size * 0.6),
-            )
-            chat_content_block, message_id_list = build_readable_messages_with_id(
-                messages=message_list_before_now,
-                timestamp_mode="normal_no_YMD",
-                read_mark=self.action_planner.last_obs_time_mark,
-                truncate=True,
-                show_actions=True,
-                show_pic_mapping_header=False,
-            )
-
-            prompt_info = await self.action_planner.build_planner_prompt(
-                is_group_chat=is_group_chat,
-                chat_target_info=chat_target_info,
-                current_available_actions=available_actions,
-                chat_content_block=chat_content_block,
-                message_id_list=message_id_list,
-                interest=global_config.personality.interest,
-            )
+            prepared_plan = await self.action_planner.prepare_plan_context(available_actions)
             continue_flag, modified_message = await events_manager.handle_mai_events(
-                EventType.ON_PLAN, None, prompt_info[0], None, self.chat_stream.stream_id
+                EventType.ON_PLAN,
+                None,
+                prepared_plan.prompt,
+                None,
+                self.chat_stream.stream_id,
             )
             if not continue_flag:
                 return False
             if modified_message and modified_message._modify_flags.modify_llm_prompt:
-                prompt_info = (modified_message.llm_prompt, prompt_info[1])
+                prepared_plan.prompt = modified_message.llm_prompt
 
             with Timer("规划器", cycle_timers):
-                action_to_use_info = await self.action_planner.plan(
-                    loop_start_time=self.last_read_time,
+                action_to_use_info = await self.action_planner.execute_prepared_plan(
+                    prepared_plan=prepared_plan,
                     available_actions=available_actions,
+                    loop_start_time=self.last_read_time,
                 )
 
             # 3. 并行执行所有动作
@@ -350,25 +230,6 @@ class BrainChatting:
             self.print_cycle_info(cycle_timers)
 
             return True
-
-    async def _main_chat_loop(self):
-        """主循环，持续进行计划并可能回复消息，直到被外部取消。"""
-        try:
-            while self.running:
-                # 主循环
-                success = await self._loopbody()
-                await asyncio.sleep(0.1)
-                if not success:
-                    break
-        except asyncio.CancelledError:
-            # 设置了关闭标志位后被取消是正常流程
-            logger.info(f"{self.log_prefix} 麦麦已关闭聊天")
-        except Exception:
-            logger.error(f"{self.log_prefix} 麦麦聊天意外错误，将于3s后尝试重新启动")
-            print(traceback.format_exc())
-            await asyncio.sleep(3)
-            self._loop_task = asyncio.create_task(self._main_chat_loop())
-        logger.error(f"{self.log_prefix} 结束了当前聊天循环")
 
     async def _handle_action(
         self,

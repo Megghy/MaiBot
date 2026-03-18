@@ -10,7 +10,6 @@ from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
 from src.config.config import global_config, model_config
 from src.llm_models.utils_model import LLMRequest
 from src.common.logger import get_logger
-from src.plugin_system.apis import frequency_api
 
 
 def init_prompt():
@@ -105,7 +104,7 @@ class FrequencyControl:
                 logger.info(f"频率调整 response: {response}")
                 logger.info(f"频率调整 reasoning_content: {reasoning_content}")
 
-            final_value_by_api = frequency_api.get_current_talk_value(self.chat_id)
+            final_value_by_api = self.get_talk_frequency_adjust() * global_config.chat.get_talk_value(self.chat_id)
 
             # LLM依然输出过多内容时取消本次调整。合法最多4个字，但有的模型可能会输出一些markdown换行符等，需要长度宽限
             if len(response) < 20:

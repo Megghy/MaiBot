@@ -57,11 +57,7 @@ def build_person_memory_block(person: Optional[Person], group_id: Optional[str] 
 
     person_name = person.person_name or person.nickname or "对方"
     entries_text = "\n".join(entries)
-    return (
-        f"关于 {person_name} 的记忆要点：\n"
-        f"{entries_text}\n"
-        "仅当这些信息与当前对话相关时再引用。\n"
-    )
+    return f"关于 {person_name} 的记忆要点：\n{entries_text}\n仅当这些信息与当前对话相关时再引用。\n"
 
 
 def build_actions_prompt_text(

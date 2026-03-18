@@ -1,11 +1,8 @@
 import random
 from typing import Tuple
 
-# 导入新插件系统
-from src.plugin_system import BaseAction, ActionActivationType
-
-# 导入依赖的系统组件
 from src.common.logger import get_logger
+from src.plugin_system.base import ActionActivationType, BaseAction
 
 # 导入API模块 - 标准Python包方式
 from src.plugin_system.apis import emoji_api, llm_api, message_api

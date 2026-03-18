@@ -1,12 +1,11 @@
 from typing import List, Tuple, Type
-from src.plugin_system import (
+from src.plugin_system.apis import emoji_api
+from src.plugin_system.base import (
     BasePlugin,
-    register_plugin,
     BaseCommand,
     ComponentInfo,
     ConfigField,
     ReplyContentType,
-    emoji_api,
 )
 from maim_message import Seg
 from src.common.logger import get_logger
@@ -368,7 +367,6 @@ class RandomEmojis(BaseCommand):
 # ===== 插件注册 =====
 
 
-@register_plugin
 class EmojiManagePlugin(BasePlugin):
     """表情包管理插件 - 管理表情包"""
 
@@ -397,3 +395,6 @@ class EmojiManagePlugin(BasePlugin):
             (ListEmojiCommand.get_command_info(), ListEmojiCommand),
             (DeleteEmojiCommand.get_command_info(), DeleteEmojiCommand),
         ]
+
+
+PLUGIN_CLASS = EmojiManagePlugin

@@ -1,7 +1,6 @@
 import asyncio
 import hashlib
 import time
-import copy
 from typing import Dict, Optional, TYPE_CHECKING
 from rich.traceback import install
 from maim_message import GroupInfo, UserInfo
@@ -159,15 +158,30 @@ class ChatManager:
             except Exception as e:
                 logger.error(f"聊天流自动保存失败: {str(e)}")
 
-    def register_message(self, message: "MessageRecv"):
-        """注册消息到聊天流"""
+    def remember_message(self, message: "MessageRecv") -> str:
+        """记录最新消息，只作为聊天流解析和上下文恢复使用。"""
         stream_id = self._generate_stream_id(
             message.message_info.platform,  # type: ignore
             message.message_info.user_info,
             message.message_info.group_info,
         )
         self.last_messages[stream_id] = message
-        # logger.debug(f"注册消息到聊天流: {stream_id}")
+        if stream := self.streams.get(stream_id):
+            stream.set_context(message)
+        return stream_id
+
+    def register_message(self, message: "MessageRecv"):
+        """兼容入口：注册消息到聊天流。"""
+        self.remember_message(message)
+
+    async def resolve_stream(self, message: "MessageRecv") -> ChatStream:
+        """根据消息解析并返回持久化聊天流。"""
+        self.remember_message(message)
+        return await self.get_or_create_stream(
+            platform=message.message_info.platform,  # type: ignore[arg-type]
+            user_info=message.message_info.user_info,  # type: ignore[arg-type]
+            group_info=message.message_info.group_info,
+        )
 
     @staticmethod
     def _generate_stream_id(
@@ -216,7 +230,6 @@ class ChatManager:
 
                 # 更新用户信息和群组信息
                 stream.update_active_time()
-                stream = copy.deepcopy(stream)  # 返回副本以避免外部修改影响缓存
                 if user_info and user_info.platform and user_info.user_id:
                     stream.user_info = user_info
                 if group_info:
@@ -277,7 +290,6 @@ class ChatManager:
             logger.error(f"获取或创建聊天流失败: {e}", exc_info=True)
             raise e
 
-        stream = copy.deepcopy(stream)
         from .message import MessageRecv  # 延迟导入，避免循环引用
 
         if stream_id in self.last_messages and isinstance(self.last_messages[stream_id], MessageRecv):

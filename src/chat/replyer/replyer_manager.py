@@ -1,18 +1,16 @@
-from typing import Dict, Optional
+from typing import Optional
 
 from src.common.logger import get_logger
 from src.chat.message_receive.chat_stream import ChatStream, get_chat_manager
 from src.chat.replyer.base_replyer import BaseReplyer
 from src.chat.replyer.group_generator import DefaultReplyer
 from src.chat.replyer.private_generator import PrivateReplyer
+from src.runtime.manager import get_runtime_manager
 
 logger = get_logger("ReplyerManager")
 
 
 class ReplyerManager:
-    def __init__(self):
-        self._repliers: Dict[str, BaseReplyer] = {}
-
     def get_replyer(
         self,
         chat_stream: Optional[ChatStream] = None,
@@ -30,15 +28,16 @@ class ReplyerManager:
             logger.warning("[ReplyerManager] 缺少 stream_id，无法获取回复器。")
             return None
 
-        # 如果已有缓存实例，直接返回
-        if stream_id in self._repliers:
+        runtime_manager = get_runtime_manager()
+        session = runtime_manager.get_session(stream_id)
+        if session and (replyer := session.get_runtime_object("replyer")):
             logger.debug(f"[ReplyerManager] 为 stream_id '{stream_id}' 返回已存在的回复器实例。")
-            return self._repliers[stream_id]
+            replyer.chat_stream = session.chat_stream
+            return replyer
 
-        # 如果没有缓存，则创建新实例（首次初始化）
         logger.debug(f"[ReplyerManager] 为 stream_id '{stream_id}' 创建新的回复器实例并缓存。")
 
-        target_stream = chat_stream
+        target_stream = chat_stream or (session.chat_stream if session else None)
         if not target_stream:
             if chat_manager := get_chat_manager():
                 target_stream = chat_manager.get_stream(stream_id)
@@ -59,7 +58,8 @@ class ReplyerManager:
                 request_type=request_type,
             )
 
-        self._repliers[stream_id] = replyer
+        session = session or runtime_manager.get_or_create_session(target_stream)
+        session.set_runtime_object("replyer", replyer)
         return replyer
 
 

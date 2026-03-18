@@ -47,6 +47,13 @@ class LLMRequest:
         }
         """模型使用量记录，用于进行负载均衡，对应为(total_tokens, penalty, usage_penalty)，惩罚值是为了能在某个模型请求不给力或正在被使用的时候进行调整"""
 
+    def sync_model_usage_state(self) -> None:
+        """在模型配置热更新后，同步运行时的模型使用统计结构。"""
+        current_usage = {
+            model_name: self.model_usage.get(model_name, (0, 0, 0)) for model_name in self.model_for_task.model_list
+        }
+        self.model_usage = current_usage
+
     async def generate_response_for_image(
         self,
         prompt: str,
@@ -137,20 +144,10 @@ class LLMRequest:
         def message_factory(client: BaseClient) -> List[Message]:
             messages: List[Message] = []
             if system_prompt:
-                system_message = (
-                    MessageBuilder()
-                    .set_role(RoleType.System)
-                    .add_text_content(system_prompt)
-                    .build()
-                )
+                system_message = MessageBuilder().set_role(RoleType.System).add_text_content(system_prompt).build()
                 messages.append(system_message)
 
-            user_message = (
-                MessageBuilder()
-                .set_role(RoleType.User)
-                .add_text_content(prompt)
-                .build()
-            )
+            user_message = MessageBuilder().set_role(RoleType.User).add_text_content(prompt).build()
             messages.append(user_message)
             return messages
 
@@ -278,6 +275,7 @@ class LLMRequest:
         """
         根据总tokens和惩罚值选择的模型
         """
+        self.sync_model_usage_state()
         for model_name in self.model_for_task.model_list:
             if exclude_models and model_name in exclude_models:
                 continue

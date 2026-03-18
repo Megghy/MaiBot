@@ -1,6 +1,4 @@
 import asyncio
-import base64
-import hashlib
 import os
 import random
 import time
@@ -396,6 +394,11 @@ class EmojiManager:
         _ensure_emoji_dir()
         Emoji.create_table(safe=True)  # Ensures table exists
         self._initialized = True
+
+    def refresh_runtime_config(self) -> None:
+        """应用运行时配置热更新。"""
+        self.emoji_num_max = global_config.emoji.max_reg_num
+        self.emoji_num_max_reach_deletion = global_config.emoji.do_replace
 
     def _ensure_db(self) -> None:
         """确保数据库已初始化"""
@@ -999,23 +1002,16 @@ class EmojiManager:
 
             # 优先从 Images / ImageDescriptions 表中复用已生成的描述和情绪标签
             try:
-                existing_image = Images.get_or_none(
-                    (Images.emoji_hash == image_hash) & (Images.type == "emoji")
-                )
+                existing_image = Images.get_or_none((Images.emoji_hash == image_hash) & (Images.type == "emoji"))
                 if existing_image and existing_image.description:
                     description = existing_image.description
                     logger.info(f"[复用描述] 找到已有详细描述: {description[:50]}...")
 
                 desc_record = ImageDescriptions.get_or_none(
-                    (ImageDescriptions.image_description_hash == image_hash)
-                    & (ImageDescriptions.type == "emoji")
+                    (ImageDescriptions.image_description_hash == image_hash) & (ImageDescriptions.type == "emoji")
                 )
                 if desc_record and desc_record.description:
-                    emotions = [
-                        e.strip()
-                        for e in re.split(r"[，,]", desc_record.description)
-                        if e.strip()
-                    ]
+                    emotions = [e.strip() for e in re.split(r"[，,]", desc_record.description) if e.strip()]
                     logger.info(f"[复用情绪标签] {emotions}")
             except Exception as e:
                 logger.debug(f"查询已有描述/情绪标签时出错: {e}")
@@ -1026,22 +1022,15 @@ class EmojiManager:
                 _ = await img_manager.get_emoji_description(image_base64)
 
                 try:
-                    existing_image = Images.get_or_none(
-                        (Images.emoji_hash == image_hash) & (Images.type == "emoji")
-                    )
+                    existing_image = Images.get_or_none((Images.emoji_hash == image_hash) & (Images.type == "emoji"))
                     if existing_image and existing_image.description:
                         description = existing_image.description
 
                     desc_record = ImageDescriptions.get_or_none(
-                        (ImageDescriptions.image_description_hash == image_hash)
-                        & (ImageDescriptions.type == "emoji")
+                        (ImageDescriptions.image_description_hash == image_hash) & (ImageDescriptions.type == "emoji")
                     )
                     if desc_record and desc_record.description:
-                        emotions = [
-                            e.strip()
-                            for e in re.split(r"[，,]", desc_record.description)
-                            if e.strip()
-                        ]
+                        emotions = [e.strip() for e in re.split(r"[，,]", desc_record.description) if e.strip()]
                 except Exception as e:
                     logger.debug(f"调用 ImageManager 后查询描述/情绪标签出错: {e}")
 

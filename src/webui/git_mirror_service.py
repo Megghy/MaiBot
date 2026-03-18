@@ -602,7 +602,7 @@ class GitMirrorService:
                 # 执行 git clone（在线程池中运行以避免阻塞）
                 loop = asyncio.get_event_loop()
 
-                def run_git_clone():
+                def run_git_clone(cmd: list[str] = cmd):
                     return subprocess.run(
                         cmd,
                         capture_output=True,

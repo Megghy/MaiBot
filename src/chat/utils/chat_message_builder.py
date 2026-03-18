@@ -567,7 +567,11 @@ def _inline_first_image_descriptions(
 
         pattern = r"\[" + re.escape(display_name) + r"\]"
 
-        def _repl(_match: re.Match) -> str:  # type: ignore[override]
+        def _repl(
+            _match: re.Match,
+            display_name: str = display_name,
+            description: str = description,
+        ) -> str:  # type: ignore[override]
             return f"[{display_name}: {description}]"
 
         # 只替换第一次出现
@@ -834,9 +838,7 @@ def build_readable_messages(
                 )
                 copy_messages.append(action_msg)
                 inserted_count += 1
-                inserted_actions.append(
-                    (str(action.action_name), float(action.time or 0), action_content)
-                )
+                inserted_actions.append((str(action.action_name), float(action.time or 0), action_content))
 
         if inserted_count > 0:
             # 只打印简要信息，避免日志过长

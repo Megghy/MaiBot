@@ -11,6 +11,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from src.config.config import MMC_VERSION
+from src.config.runtime_reload import hot_reload_all_configs
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -87,11 +88,12 @@ async def get_maibot_status():
 async def reload_config():
     """
     热重载配置（不重启进程）
-
-    仅重新加载配置文件，某些配置可能需要重启才能生效。
-    此功能需要在主程序中实现配置热重载逻辑。
     """
-    # 这里需要调用主程序的配置重载函数
-    # 示例：await app_instance.reload_config()
-
-    return {"success": True, "message": "配置重载功能待实现"}
+    try:
+        reload_result = hot_reload_all_configs()
+        message = "配置已重新加载并热生效"
+        if reload_result.pending_restart:
+            message += f"，以下配置节仍需重启: {', '.join(reload_result.pending_restart)}"
+        return {"success": True, "message": message, "reload": reload_result.to_dict()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"热重载配置失败: {str(e)}") from e

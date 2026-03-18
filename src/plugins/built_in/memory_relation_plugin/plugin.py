@@ -2,19 +2,19 @@ from __future__ import annotations
 
 from typing import List, Tuple, Type
 
-from src.plugin_system import BasePlugin, register_plugin, ComponentInfo
-from src.plugin_system.base.config_types import ConfigField
 from src.common.logger import get_logger
+from src.plugin_system.base import BasePlugin, ComponentInfo, ConfigField
 
 from .actions import BuildMemoryAction, BuildRelationAction
 
 logger = get_logger("memory_relation_plugin")
 
 
-@register_plugin
 class MemoryRelationPlugin(BasePlugin):
     plugin_name: str = "memory_relation_plugin"
     enable_plugin: bool = True
+    dependencies: list[str] = []
+    python_dependencies: list[str] = []
     config_file_name: str = "config.toml"
 
     config_section_descriptions = {

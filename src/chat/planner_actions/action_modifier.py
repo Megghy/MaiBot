@@ -10,8 +10,8 @@ from src.llm_models.utils_model import LLMRequest
 from src.chat.message_receive.chat_stream import get_chat_manager, ChatMessageContext
 from src.chat.planner_actions.action_manager import ActionManager
 from src.chat.utils.chat_message_builder import get_raw_msg_before_timestamp_with_chat, build_readable_messages
-from src.plugin_system.base.component_types import ActionInfo, ActionActivationType
-from src.plugin_system.core.global_announcement_manager import global_announcement_manager
+from src.plugin_system.base.component_types import ActionInfo, ActionActivationType, ComponentType
+from src.runtime.local_component_state import local_component_state
 
 if TYPE_CHECKING:
     from src.chat.message_receive.chat_stream import ChatStream
@@ -83,7 +83,7 @@ class ActionModifier:
             chat_content = chat_content + "\n" + f"现在，最新的消息是：{message_content}"
 
         # === 第一阶段：去除用户自行禁用的 ===
-        disabled_actions = global_announcement_manager.get_disabled_chat_actions(self.chat_id)
+        disabled_actions = local_component_state.get_disabled_components(self.chat_id, ComponentType.ACTION)
         if disabled_actions:
             for disabled_action_name in disabled_actions:
                 if disabled_action_name in all_actions:

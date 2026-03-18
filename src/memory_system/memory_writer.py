@@ -118,28 +118,26 @@ def build_memory_write_request(
     return request
 
 
-def persist_memory_request(request: MemoryWriteRequest) -> bool:
-    """根据请求写入记忆，成功返回 True"""
+async def persist_memory_request(request: MemoryWriteRequest) -> bool:
+    """根据请求写入记忆，成功返回 True。异常直接向上抛出。"""
 
-    try:
-        if request.group_id:
-            added = request.person.add_group_memory_point(
-                request.group_id,
-                request.memory_content,
-                category=request.category,
-                weight=request.weight,
-            )
-        else:
-            added = request.person.add_memory_point(
-                request.memory_content,
-                category=request.category,
-                weight=request.weight,
-                context=request.context,
-                source=request.source,
-            )
-        if not added:
-            logger.debug("记忆写入失败，可能是重复内容")
-        return bool(added)
-    except Exception as exc:
-        logger.error(f"写入记忆失败: {exc}")
-        return False
+    if request.group_id:
+        added = await request.person.async_add_group_memory_point(
+            request.group_id,
+            request.memory_content,
+            category=request.category,
+            weight=request.weight,
+            source=request.source,
+            context=request.context,
+        )
+    else:
+        added = await request.person.async_add_memory_point(
+            request.memory_content,
+            category=request.category,
+            weight=request.weight,
+            context=request.context,
+            source=request.source,
+        )
+    if not added:
+        logger.debug("记忆写入失败，可能是重复内容")
+    return bool(added)

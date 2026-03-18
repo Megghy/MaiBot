@@ -363,7 +363,9 @@ def _get_random_default_reply() -> str:
     return random.choice(default_replies)
 
 
-def process_llm_response(text: str, enable_splitter: bool = True, enable_chinese_typo: bool = True) -> list[tuple[str, float]]:
+def process_llm_response(
+    text: str, enable_splitter: bool = True, enable_chinese_typo: bool = True
+) -> list[tuple[str, float]]:
     if not global_config.response_post_process.enable_response_post_process:
         return [(text, 0.0)]
 

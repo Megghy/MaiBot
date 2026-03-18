@@ -67,8 +67,8 @@ class UniversalMessageSender:
                 message.build_reply()
                 logger.debug(f"[{chat_id}] 选择回复引用消息: {message.processed_plain_text[:20]}...")
 
-            from src.plugin_system.core.events_manager import events_manager
             from src.plugin_system.base.component_types import EventType
+            from src.runtime import events_manager
 
             continue_flag, modified_message = await events_manager.handle_mai_events(
                 EventType.POST_SEND_PRE_PROCESS, message=message, stream_id=chat_id

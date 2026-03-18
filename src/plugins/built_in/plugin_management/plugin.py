@@ -1,17 +1,14 @@
 import asyncio
 
 from typing import List, Tuple, Type
-from src.plugin_system import (
+from src.plugin_system.apis import component_manage_api, plugin_manage_api, send_api
+from src.plugin_system.base import (
     BasePlugin,
     BaseCommand,
     CommandInfo,
     ConfigField,
-    register_plugin,
-    plugin_manage_api,
-    component_manage_api,
     ComponentInfo,
     ComponentType,
-    send_api,
 )
 
 
@@ -430,7 +427,6 @@ class ManagementCommand(BaseCommand):
         await send_api.text_to_stream(message, self.stream_id, typing=False, storage_message=False)
 
 
-@register_plugin
 class PluginManagementPlugin(BasePlugin):
     plugin_name: str = "plugin_management_plugin"
     enable_plugin: bool = False

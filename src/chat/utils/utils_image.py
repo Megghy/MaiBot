@@ -5,7 +5,7 @@ import hashlib
 import uuid
 import io
 import numpy as np
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple
 
 from PIL import Image
 from rich.traceback import install
@@ -41,7 +41,7 @@ PROMPTS = {
         "基于表情包描述提取3-12个聊天风格和内容/人物/分类的标签\n"
         "要求：标签简练，可以使用词语或短语，逗号分隔，不要解释，去重。\n"
         "描述：'{description}'"
-    )
+    ),
 }
 
 
@@ -105,7 +105,7 @@ class ImageManager:
                 image_format = (img.format or "PNG").lower()
         except Exception:
             image_format = "unknown"
-            
+
         return image_bytes, image_hash, image_format
 
     @staticmethod
@@ -174,8 +174,9 @@ class ImageManager:
 
     async def get_emoji_tag(self, image_base64: str) -> str:
         from src.chat.emoji_system.emoji_manager import get_emoji_manager
+
         _, image_hash, _ = self._decode_image(image_base64)
-        
+
         if emoji := await get_emoji_manager().get_emoji_from_manager(image_hash):
             return f"[表情包：{','.join(emoji.emotion)}]"
         return "[表情包：未知]"
@@ -187,6 +188,7 @@ class ImageManager:
 
             # 1. 优先检查 EmojiManager
             from src.chat.emoji_system.emoji_manager import get_emoji_manager
+
             if tags := await get_emoji_manager().get_emoji_tag_by_hash(image_hash):
                 logger.info(f"[缓存命中] 使用已注册表情包描述: {tags}...")
                 return f"[表情包：{','.join(tags)}]"
@@ -249,7 +251,7 @@ class ImageManager:
             emoji_dir = os.path.join(self.IMAGE_DIR, "emoji")
             os.makedirs(emoji_dir, exist_ok=True)
             file_path = os.path.join(emoji_dir, filename)
-            
+
             with open(file_path, "wb") as f:
                 f.write(image_bytes)
 
@@ -259,7 +261,7 @@ class ImageManager:
                 "type": "emoji",
                 "description": description,
                 "timestamp": time.time(),
-                "vlm_processed": True
+                "vlm_processed": True,
             }
             record, created = Images.get_or_create(emoji_hash=image_hash, type="emoji", defaults=defaults)
             if not created:
@@ -361,7 +363,7 @@ class ImageManager:
 
             # 4. 保存结果
             self._save_image_record(existing_image, image_hash, image_bytes, image_format, description)
-            
+
             return f"[图片：{description}]"
 
         except Exception as e:
@@ -399,9 +401,9 @@ class ImageManager:
                     vlm_processed=True,
                     count=1,
                 )
-            
+
             self._save_description_to_db(image_hash, description, "image")
-            
+
         except Exception as e:
             logger.error(f"保存图片记录失败: {e}")
 
@@ -414,20 +416,20 @@ class ImageManager:
         """处理图片并返回图片ID和描述占位符"""
         try:
             _, image_hash, _ = self._decode_image(image_base64)
-            
+
             # 检查现有记录
             if existing_image := Images.get_or_none(Images.emoji_hash == image_hash):
                 if not existing_image.image_id:
                     existing_image.image_id = str(uuid.uuid4())
                     existing_image.save()
-                
+
                 existing_image.count = (existing_image.count or 0) + 1
                 existing_image.save()
                 return existing_image.image_id, f"[picid:{existing_image.image_id}]"
 
             # 新图片
             image_id = str(uuid.uuid4())
-            
+
             # 先创建占位记录以返回 ID
             try:
                 image_bytes = base64.b64decode(image_base64)
@@ -493,9 +495,9 @@ class ImageManager:
         try:
             if isinstance(gif_base64, str):
                 gif_base64 = gif_base64.encode("ascii", errors="ignore").decode("ascii")
-            
+
             gif = Image.open(io.BytesIO(base64.b64decode(gif_base64)))
-            
+
             all_frames = []
             try:
                 while True:
@@ -510,7 +512,7 @@ class ImageManager:
             # 帧选择
             selected_frames = []
             last_frame_np = None
-            
+
             for i, frame in enumerate(all_frames):
                 frame_np = np.array(frame)
                 if i == 0:
@@ -532,15 +534,19 @@ class ImageManager:
             # 拼接
             target_height = 200
             frame_width, frame_height = selected_frames[0].size
-            if frame_height == 0: return None
-            
+            if frame_height == 0:
+                return None
+
             target_width = int((target_height / frame_height) * frame_width) or 1
-            
-            resized_frames = [f.resize((target_width, target_height), Image.Resampling.LANCZOS) for f in selected_frames]
+
+            resized_frames = [
+                f.resize((target_width, target_height), Image.Resampling.LANCZOS) for f in selected_frames
+            ]
             total_width = target_width * len(resized_frames)
-            
-            if total_width == 0: return None
-            
+
+            if total_width == 0:
+                return None
+
             combined = Image.new("RGB", (total_width, target_height))
             for idx, frame in enumerate(resized_frames):
                 combined.paste(frame, (idx * target_width, 0))

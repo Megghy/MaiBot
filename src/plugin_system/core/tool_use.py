@@ -2,13 +2,14 @@ import time
 from typing import List, Dict, Tuple, Optional, Any
 from src.plugin_system.apis.tool_api import get_llm_available_tool_definitions, get_tool_instance
 from src.plugin_system.base.base_tool import BaseTool
-from src.plugin_system.core.global_announcement_manager import global_announcement_manager
+from src.plugin_system.base.component_types import ComponentType
 from src.llm_models.utils_model import LLMRequest
 from src.llm_models.payload_content import ToolCall
 from src.config.config import global_config, model_config
 from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
 from src.chat.message_receive.chat_stream import get_chat_manager
 from src.common.logger import get_logger
+from src.runtime.local_component_state import local_component_state
 
 logger = get_logger("tool_use")
 
@@ -142,7 +143,7 @@ class ToolExecutor:
 
     def _get_tool_definitions(self) -> List[Dict[str, Any]]:
         all_tools = get_llm_available_tool_definitions()
-        user_disabled_tools = global_announcement_manager.get_disabled_chat_tools(self.chat_id)
+        user_disabled_tools = local_component_state.get_disabled_components(self.chat_id, ComponentType.TOOL)
         return [definition for name, definition in all_tools if name not in user_disabled_tools]
 
     async def execute_tool_calls(self, tool_calls: Optional[List[ToolCall]]) -> Tuple[List[Dict[str, Any]], List[str]]:

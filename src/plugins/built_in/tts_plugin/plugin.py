@@ -1,4 +1,3 @@
-from src.plugin_system.apis.plugin_register_api import register_plugin
 from src.plugin_system.base.base_plugin import BasePlugin
 from src.plugin_system.base.component_types import ComponentInfo
 from src.common.logger import get_logger
@@ -91,7 +90,6 @@ class TTSAction(BaseAction):
         return processed_text
 
 
-@register_plugin
 class TTSPlugin(BasePlugin):
     """TTS插件
     - 这是文字转语音插件

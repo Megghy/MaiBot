@@ -85,34 +85,38 @@ def _build_record_dict(record: PersonInfo, match_type: str) -> Dict[str, Any]:
             if isinstance(memory_points_data, list):
                 # Sort by weight descending
                 sorted_memories = sorted(
-                    memory_points_data, 
-                    key=lambda x: float(x.get("weight", 0) if isinstance(x, dict) else 0), 
-                    reverse=True
+                    memory_points_data,
+                    key=lambda x: float(x.get("weight", 0) if isinstance(x, dict) else 0),
+                    reverse=True,
                 )
-                
+
                 memory_entries = []
-                for memory_point in sorted_memories[:15]: # Limit to top 15
+                for memory_point in sorted_memories[:15]:  # Limit to top 15
                     if isinstance(memory_point, dict):
-                        memory_entries.append({
-                            "category": memory_point.get("category", "其他"),
-                            "content": memory_point.get("content", ""),
-                            "weight": memory_point.get("weight", 0)
-                        })
+                        memory_entries.append(
+                            {
+                                "category": memory_point.get("category", "其他"),
+                                "content": memory_point.get("content", ""),
+                                "weight": memory_point.get("weight", 0),
+                            }
+                        )
                     elif isinstance(memory_point, str):
-                         parts = memory_point.split(":", 2)
-                         if len(parts) >= 3:
-                            memory_entries.append({
-                                "category": parts[0].strip(),
-                                "content": parts[1].strip(),
-                                "weight": parts[2].strip(),
-                            })
-                         else:
+                        parts = memory_point.split(":", 2)
+                        if len(parts) >= 3:
+                            memory_entries.append(
+                                {
+                                    "category": parts[0].strip(),
+                                    "content": parts[1].strip(),
+                                    "weight": parts[2].strip(),
+                                }
+                            )
+                        else:
                             memory_entries.append({"raw": memory_point})
-                
+
                 if memory_entries:
                     payload["top_memories"] = memory_entries
                     payload["memory_count"] = len(memory_points_data)
-                    
+
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
             logger.warning(f"解析用户 {record.person_id} 的memory_points失败: {exc}")
             payload["memory_error"] = "记忆数据解析失败"
