@@ -168,6 +168,30 @@ class PersonInfoManager:
 person_info_manager = PersonInfoManager()
 
 
+def _resolve_person_for_memory(person_name: str, chat_stream):
+    from src.person_info.person_info import Person
+
+    if person_name == global_config.bot.nickname:
+        return Person(platform=global_config.bot.platform, user_id=global_config.bot.qq_account)
+
+    person_id = get_person_id_by_person_name(person_name) or get_person_id_by_alias(person_name)
+    if not person_id and chat_stream.user_info:
+        user_nickname = (chat_stream.user_info.user_nickname or "").strip()
+        if user_nickname and user_nickname == person_name:
+            person_id = get_person_id(chat_stream.platform, chat_stream.user_info.user_id)
+
+    if not person_id:
+        logger.warning(f"无法确定person_id，person_name: {person_name}, chat_id: {chat_stream.stream_id}")
+        return None
+
+    person = Person(person_id=person_id)
+    if not person.is_known:
+        logger.warning(f"用户 {person_name} (person_id: {person_id}) 尚未认识，无法存储记忆")
+        return None
+
+    return person
+
+
 async def store_person_memory_from_answer(person_name: str, memory_content: str, chat_id: str) -> None:
     try:
         person_name = (person_name or "").strip()
@@ -181,41 +205,27 @@ async def store_person_memory_from_answer(person_name: str, memory_content: str,
             logger.warning(f"无法获取chat_stream for chat_id: {chat_id}")
             return
 
-        platform = chat_stream.platform
         group_id: Optional[str] = None
         if getattr(chat_stream, "group_info", None):
             try:
-                group_id = chat_stream.group_info.group_id
+                group_id = str(chat_stream.group_info.group_id)
             except Exception:
                 group_id = None
 
-        from src.person_info.person_info import Person
-
-        if person_name == global_config.bot.nickname:
-            person = Person(platform=global_config.bot.platform, user_id=global_config.bot.qq_account)
-            person_id = person.person_id
-        else:
-            person_id = get_person_id_by_person_name(person_name) or get_person_id_by_alias(person_name)
-            if not person_id and chat_stream.user_info:
-                user_nickname = (chat_stream.user_info.user_nickname or "").strip()
-                if user_nickname and user_nickname == person_name:
-                    person_id = get_person_id(platform, chat_stream.user_info.user_id)
-
-            if not person_id:
-                logger.warning(f"无法确定person_id，person_name: {person_name}, chat_id: {chat_id}")
-                return
-
-            person = Person(person_id=person_id)
-
-        if not person.is_known:
-            logger.warning(f"用户 {person_name} (person_id: {person_id}) 尚未认识，无法存储记忆")
+        person = _resolve_person_for_memory(person_name, chat_stream)
+        if not person:
             return
 
-        category = infer_memory_category(memory_content)
-        if group_id:
-            added = person.add_group_memory_point(group_id, memory_content, category=category, weight=1.0)
-        else:
-            added = person.add_memory_point(memory_content, category=category, weight=1.0)
+        from src.memory_system.memory_writer import MemoryWriteRequest, persist_memory_request
+
+        request = MemoryWriteRequest(
+            person=person,
+            memory_content=memory_content,
+            category=infer_memory_category(memory_content),
+            weight=1.0,
+            group_id=group_id,
+        )
+        added = await persist_memory_request(request)
 
         if added:
             scope = f"群 {group_id}" if group_id else "全局"

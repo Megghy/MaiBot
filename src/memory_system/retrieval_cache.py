@@ -1,5 +1,6 @@
 import json
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.common.database.database_model import ThinkingBack
@@ -12,6 +13,14 @@ THINKING_BACK_NOT_FOUND_RETENTION_SECONDS = 36000
 THINKING_BACK_CLEANUP_INTERVAL_SECONDS = 3000
 
 _last_not_found_cleanup_ts: float = 0.0
+
+
+@dataclass(slots=True)
+class CachedMemoryEntry:
+    question: str
+    answer: str
+    thinking_steps: List[Dict[str, Any]]
+    block: str
 
 
 def _cleanup_stale_not_found_thinking_back() -> None:
@@ -73,8 +82,8 @@ def _get_recent_query_history(chat_id: str, time_window_seconds: float = 300.0) 
         return ""
 
 
-def _get_cached_memories(chat_id: str, time_window_seconds: float = 300.0) -> List[str]:
-    """获取最近一段时间内缓存的记忆（只返回找到答案的记录）"""
+def _get_cached_memory_entries(chat_id: str, time_window_seconds: float = 300.0) -> List[CachedMemoryEntry]:
+    """获取最近一段时间内缓存的记忆（只返回找到答案的结构化记录）"""
     try:
         current_time = time.time()
         start_time = current_time - time_window_seconds
@@ -93,18 +102,24 @@ def _get_cached_memories(chat_id: str, time_window_seconds: float = 300.0) -> Li
         if not records.exists():
             return []
 
-        cached_memories: List[str] = []
+        cached_memories: List[CachedMemoryEntry] = []
         for record in records:
             if not record.answer:
                 continue
 
             thinking_steps = _load_thinking_steps(record.thinking_steps)
+            block = _format_answer_payload(
+                record.question,
+                record.answer,
+                thinking_steps,
+                from_cache=True,
+            )
             cached_memories.append(
-                _format_answer_payload(
+                CachedMemoryEntry(
                     record.question,
                     record.answer,
                     thinking_steps,
-                    from_cache=True,
+                    block,
                 )
             )
 
@@ -112,6 +127,10 @@ def _get_cached_memories(chat_id: str, time_window_seconds: float = 300.0) -> Li
     except Exception as exc:
         logger.error(f"获取缓存记忆失败: {exc}")
         return []
+
+
+def _get_cached_memories(chat_id: str, time_window_seconds: float = 300.0) -> List[str]:
+    return [entry.block for entry in _get_cached_memory_entries(chat_id, time_window_seconds=time_window_seconds)]
 
 
 def _query_thinking_back(chat_id: str, question: str) -> Optional[Tuple[bool, str, List[Dict[str, Any]]]]:

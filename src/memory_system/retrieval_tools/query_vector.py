@@ -1,15 +1,11 @@
-"""
-向量检索工具 - 工具实现
-"""
+"""向量检索工具 - 工具实现"""
 
 from typing import Optional
-from src.common.logger import get_logger
-from src.common.vector_store.manager import vector_manager
-from src.person_info.person_info import get_person_id_by_person_name, get_person_id_by_alias
-from .tool_registry import register_memory_retrieval_tool
-from .tool_utils import format_tool_response
 
-logger = get_logger("vector_retrieval_tools")
+from src.memory_system.retrieval_sources import JARGON_SOURCE, PERSON_MEMORY_SOURCE, RetrievalSourceRequest
+
+from .tool_registry import register_memory_retrieval_tool
+from .tool_utils import format_source_result
 
 
 async def query_person_memory(query: str, person_name: Optional[str] = None, chat_id: str = None) -> str:
@@ -24,40 +20,14 @@ async def query_person_memory(query: str, person_name: Optional[str] = None, cha
     Returns:
         查询结果
     """
-    try:
-        target_person_id = None
-        if person_name:
-            target_person_id = get_person_id_by_person_name(person_name)
-            if not target_person_id:
-                target_person_id = get_person_id_by_alias(person_name)
-
-        def filter_fn(meta):
-            if target_person_id:
-                return meta.get("person_id") == target_person_id
-            return True
-
-        results = await vector_manager.search_memory(query, k=5, filter_fn=filter_fn)
-
-        if not results:
-            return format_tool_response(False, f"未找到关于'{query}'的相关记忆", {"query": query})
-
-        formatted_results = []
-        for res in results:
-            formatted_results.append(
-                {
-                    "content": res.get("text", ""),  # faiss_store stores as 'text'
-                    "score": f"{res.get('similarity', 0):.4f}",
-                    "category": res.get("category", "unknown"),
-                    "person_id": res.get("person_id", "unknown"),
-                }
-            )
-
-        return format_tool_response(
-            True, f"找到 {len(results)} 条相关记忆", {"query": query, "results": formatted_results}
+    result = await PERSON_MEMORY_SOURCE.collect(
+        RetrievalSourceRequest(
+            chat_id=chat_id or "",
+            question=query,
+            person_name=person_name or "",
         )
-    except Exception as e:
-        logger.error(f"向量记忆检索失败: {e}")
-        return format_tool_response(False, f"检索失败: {str(e)}")
+    )
+    return format_source_result(result)
 
 
 async def query_jargon(query: str, chat_id: str = None) -> str:
@@ -71,31 +41,13 @@ async def query_jargon(query: str, chat_id: str = None) -> str:
     Returns:
         查询结果
     """
-    try:
-        # Jargon usually global or chat specific.
-        # Vector search implies we want meaning.
-
-        results = await vector_manager.search_jargon(query, k=5)
-
-        if not results:
-            return format_tool_response(False, f"未找到关于'{query}'的相关黑话", {"query": query})
-
-        formatted_results = []
-        for res in results:
-            formatted_results.append(
-                {
-                    "term": res.get("text", ""),  # The jargon term itself
-                    "meaning": res.get("meaning", ""),
-                    "score": f"{res.get('similarity', 0):.4f}",
-                }
-            )
-
-        return format_tool_response(
-            True, f"找到 {len(results)} 条相关黑话", {"query": query, "results": formatted_results}
+    result = await JARGON_SOURCE.collect(
+        RetrievalSourceRequest(
+            chat_id=chat_id or "",
+            question=query,
         )
-    except Exception as e:
-        logger.error(f"向量黑话检索失败: {e}")
-        return format_tool_response(False, f"检索失败: {str(e)}")
+    )
+    return format_source_result(result)
 
 
 def register_tool():

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+from dataclasses import dataclass, field
 from typing import Dict, List
 
 from json_repair import repair_json
@@ -13,6 +14,12 @@ from src.plugin_system.apis import llm_api
 logger = get_logger("memory_retrieval")
 
 MIN_JARGON_FALLBACK_CONFIDENCE = 0.75
+
+
+@dataclass(slots=True)
+class ConceptRetrievalResult:
+    content: str = ""
+    learned_jargon: dict[str, str] = field(default_factory=dict)
 
 
 def _extract_keywords(text: str, *, max_keywords: int = 6) -> List[str]:
@@ -43,11 +50,9 @@ def _build_focus_summary(chat_history: str, target_message: str, keywords: List[
     return "\n".join(summary_lines) if summary_lines else "无可用摘要"
 
 
-async def _fallback_explain_concepts_with_llm(concepts: List[str], context: str, chat_id: str) -> Dict[str, str]:
+async def _fallback_explain_concepts_with_llm(concepts: List[str], context: str) -> Dict[str, str]:
     if not concepts:
         return {}
-
-    from src.jargon.jargon_miner import store_jargon_from_answer
 
     safe_context = (context or "").strip()
     if safe_context:
@@ -123,22 +128,15 @@ async def _fallback_explain_concepts_with_llm(concepts: List[str], context: str,
             continue
         results[term] = meaning
 
-    if not results:
-        return {}
-
-    for term, meaning in results.items():
-        try:
-            asyncio.create_task(store_jargon_from_answer(term, meaning, chat_id))
-        except Exception as exc:
-            logger.error(f"异步写入 jargon 失败: {exc}")
-
     return results
 
 
-async def _retrieve_concepts_with_jargon(concepts: List[str], chat_id: str, context: str = "") -> str:
+async def _retrieve_concepts_with_jargon(
+    concepts: List[str], chat_id: str, context: str = ""
+) -> ConceptRetrievalResult:
     """对概念列表进行jargon检索"""
     if not concepts:
-        return ""
+        return ConceptRetrievalResult()
 
     from src.common.vector_store.manager import vector_manager
     from src.jargon.jargon_miner import search_jargon
@@ -215,7 +213,7 @@ async def _retrieve_concepts_with_jargon(concepts: List[str], chat_id: str, cont
 
     if unknown_concepts:
         try:
-            fallback_map = await _fallback_explain_concepts_with_llm(unknown_concepts, context, chat_id)
+            fallback_map = await _fallback_explain_concepts_with_llm(unknown_concepts, context)
         except Exception as exc:
             logger.error(f"jargon fallback 解释失败: {exc}")
             fallback_map = {}
@@ -228,5 +226,8 @@ async def _retrieve_concepts_with_jargon(concepts: List[str], chat_id: str, cont
                         results.append(f"'{concept}' 的含义为：{meaning_text}")
 
     if results:
-        return "【概念检索结果】\n" + "\n".join(results) + "\n"
-    return ""
+        return ConceptRetrievalResult(
+            content="【概念检索结果】\n" + "\n".join(results) + "\n",
+            learned_jargon=fallback_map if unknown_concepts else {},
+        )
+    return ConceptRetrievalResult(learned_jargon=fallback_map if unknown_concepts else {})

@@ -1,13 +1,14 @@
 import time
 import random
 import asyncio
-from typing import Optional, Set
+from dataclasses import dataclass
+from typing import Any, Optional
 
 from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
 from src.common.logger import get_logger
 from src.config.config import global_config, model_config
+from src.memory_system.memory_ingester import schedule_jargon_ingestion, schedule_question_answer_ingestion
 from src.memory_system.retrieval_agent import _react_agent_solve_question
-from src.memory_system.retrieval_analysis import _analyze_question_answer
 from src.memory_system.retrieval_cache import (
     _cleanup_stale_not_found_thinking_back,
     _query_thinking_back,
@@ -19,8 +20,12 @@ from src.memory_system.retrieval_concepts import (
 )
 from src.memory_system.retrieval_format import (
     _extract_answer_source,
-    _extract_question_from_block,
     _format_answer_payload,
+)
+from src.memory_system.retrieval_merge import (
+    build_cached_memory_block,
+    build_question_memory_block,
+    merge_ranked_memory_blocks,
 )
 from src.memory_system.retrieval_questioning import (
     _build_participant_hints,
@@ -41,6 +46,15 @@ from src.plugin_system.apis import llm_api
 logger = get_logger("memory_retrieval")
 
 MAX_QUESTIONS_PER_TURN = 2
+
+
+@dataclass(slots=True)
+class QuestionRetrievalResult:
+    question: str
+    answer: str
+    thinking_steps: Optional[list[dict[str, Any]]] = None
+    from_cache: bool = False
+    should_ingest: bool = False
 
 
 def init_memory_retrieval_prompt():
@@ -169,7 +183,12 @@ Action: 调用 `found_answer(answer="昨天张三提到了GitHub", source="memor
     )
 
 
-async def _process_single_question(question: str, chat_id: str, context: str, initial_info: str = "") -> Optional[str]:
+async def _process_single_question(
+    question: str,
+    chat_id: str,
+    context: str,
+    initial_info: str = "",
+) -> Optional[QuestionRetrievalResult]:
     """处理单个问题的查询（包含缓存检查逻辑）
 
     Args:
@@ -179,7 +198,7 @@ async def _process_single_question(question: str, chat_id: str, context: str, in
         initial_info: 初始信息（如概念检索结果），将传递给ReAct Agent
 
     Returns:
-        Optional[str]: 如果找到答案，返回格式化的结果字符串，否则返回None
+        Optional[QuestionRetrievalResult]: 如果找到答案，返回结构化结果，否则返回None
     """
     logger.info(f"开始处理问题: {question}")
 
@@ -222,10 +241,10 @@ async def _process_single_question(question: str, chat_id: str, context: str, in
 
             if cached_answer and random.random() <= reuse_probability:
                 logger.info(f"直接复用thinking_back缓存答案，问题: {question[:50]}... 概率: {reuse_probability}")
-                return _format_answer_payload(
-                    question,
-                    cached_answer,
-                    cached_steps,
+                return QuestionRetrievalResult(
+                    question=question,
+                    answer=cached_answer,
+                    thinking_steps=cached_steps,
                     from_cache=True,
                 )
 
@@ -268,12 +287,11 @@ async def _process_single_question(question: str, chat_id: str, context: str, in
             logger.info(f"ReAct Agent超时，不存储到数据库，问题: {question[:50]}...")
 
         if found_answer and answer:
-            # 创建异步任务分析问题和答案
-            asyncio.create_task(_analyze_question_answer(question, answer, chat_id))
-            return _format_answer_payload(
-                question,
-                answer,
-                thinking_steps,
+            return QuestionRetrievalResult(
+                question=question,
+                answer=answer,
+                thinking_steps=thinking_steps,
+                should_ingest=True,
             )
 
     return None
@@ -367,7 +385,9 @@ async def build_memory_retrieval_prompt(
             ),
             [CONCEPT_EXPANSION_SOURCE, CACHED_MEMORIES_SOURCE],
         )
-        concept_info = source_results[CONCEPT_EXPANSION_SOURCE.name].content
+        concept_result = source_results[CONCEPT_EXPANSION_SOURCE.name]
+        concept_info = concept_result.content
+        learned_jargon = concept_result.payload or {}
         cached_memories = source_results[CACHED_MEMORIES_SOURCE.name].payload or []
 
         initial_info = ""
@@ -376,6 +396,8 @@ async def build_memory_retrieval_prompt(
             logger.info(f"概念检索完成，结果: {concept_info[:200]}...")
         elif concepts:
             logger.info("概念检索未找到任何结果")
+        if learned_jargon:
+            schedule_jargon_ingestion(learned_jargon, chat_id)
 
         if not questions:
             logger.info("问题列表为空，跳过记忆检索")
@@ -409,34 +431,50 @@ async def build_memory_retrieval_prompt(
         # 并行执行所有查询任务
         results = await asyncio.gather(*question_tasks, return_exceptions=True)
 
-        # 收集所有有效结果
-        all_results = []
-        current_questions: Set[str] = set()  # 用于去重，避免缓存和当次查询重复
+        # 显式构建 question/cached 两类命中块，再交给 merge 层去重排序
+        question_blocks = []
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 logger.error(f"处理问题 '{questions[i]}' 时发生异常: {result}")
             elif result is not None:
-                all_results.append(result)
-                question_line = _extract_question_from_block(result)
-                if question_line:
-                    current_questions.add(question_line)
-                    logger.debug(f"提取到问题：{question_line[:50]}...")
+                if result.should_ingest:
+                    schedule_question_answer_ingestion(result.question, result.answer, chat_id)
+                formatted_block = _format_answer_payload(
+                    result.question,
+                    result.answer,
+                    result.thinking_steps,
+                    from_cache=result.from_cache,
+                )
+                question_blocks.append(
+                    build_question_memory_block(
+                        question=result.question,
+                        block=formatted_block,
+                        raw_source=_extract_answer_source(result.thinking_steps or []),
+                        from_cache=result.from_cache,
+                        order=i,
+                    )
+                )
+                logger.debug(f"提取到问题：{result.question[:50]}...")
 
-        # 将缓存的记忆添加到结果中（排除当次查询已包含的问题，避免重复）
-        for cached_memory in cached_memories:
-            question_line = _extract_question_from_block(cached_memory)
-            if not question_line:
+        cached_blocks = []
+        for i, cached_memory in enumerate(cached_memories):
+            cached_block = build_cached_memory_block(
+                question=cached_memory.question,
+                block=cached_memory.block,
+                order=i,
+            )
+            if cached_block is None:
                 continue
+            cached_blocks.append(cached_block)
+            logger.debug(f"添加缓存记忆候选: {cached_block.question[:50]}...")
 
-            # 只有当次查询中没有相同问题时，才添加缓存记忆
-            if question_line not in current_questions:
-                all_results.append(cached_memory)
-                logger.debug(f"添加缓存记忆: {question_line[:50]}...")
+        all_results = merge_ranked_memory_blocks(
+            initial_info=initial_info,
+            question_blocks=question_blocks,
+            cached_blocks=cached_blocks,
+        )
 
         end_time = time.time()
-
-        if initial_info:
-            all_results.insert(0, initial_info.strip())
 
         if all_results:
             retrieved_memory = "\n\n".join(all_results)

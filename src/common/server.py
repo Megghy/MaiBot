@@ -5,6 +5,8 @@ import asyncio
 import os
 from rich.traceback import install
 
+from src.common.net_utils import ensure_tcp_port_available
+
 install(extra_lines=3)
 
 
@@ -49,6 +51,8 @@ class Server:
 
     async def run(self):
         """启动服务器"""
+        ensure_tcp_port_available(self._host, self._port, service_name="HTTP服务器")
+
         # 禁用 uvicorn 默认日志和访问日志
         config = Config(app=self.app, host=self._host, port=self._port, log_config=None, access_log=False)
         self._server = UvicornServer(config=config)
@@ -57,6 +61,9 @@ class Server:
         except KeyboardInterrupt:
             await self.shutdown()
             raise
+        except SystemExit as e:
+            await self.shutdown()
+            raise RuntimeError(f"HTTP服务器启动失败: {e}") from e
         except Exception as e:
             await self.shutdown()
             raise RuntimeError(f"服务器运行错误: {str(e)}") from e

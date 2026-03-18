@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 
 import src.memory_system.retrieval_sources as retrieval_sources
+from src.memory_system.retrieval_cache import CachedMemoryEntry
+from src.memory_system.retrieval_concepts import ConceptRetrievalResult
 from src.memory_system.retrieval_sources import (
     CACHED_MEMORIES_SOURCE,
     CONCEPT_EXPANSION_SOURCE,
@@ -60,11 +62,18 @@ async def test_collect_retrieval_source_results_isolates_source_errors():
 
 @pytest.mark.asyncio
 async def test_cached_memories_source_returns_payload_and_joined_content(monkeypatch):
-    monkeypatch.setattr(retrieval_sources, "_get_cached_memories", lambda *args, **kwargs: ["a", "b"])
+    monkeypatch.setattr(
+        retrieval_sources,
+        "_get_cached_memory_entries",
+        lambda *args, **kwargs: [
+            CachedMemoryEntry(question="问题1", answer="答案1", thinking_steps=[], block="a"),
+            CachedMemoryEntry(question="问题2", answer="答案2", thinking_steps=[], block="b"),
+        ],
+    )
 
     result = await CACHED_MEMORIES_SOURCE.collect(RetrievalSourceRequest(chat_id="chat-1"))
 
-    assert result.payload == ["a", "b"]
+    assert [entry.block for entry in result.payload] == ["a", "b"]
     assert result.content == "a\n\nb"
     assert result.metadata["count"] == 2
 
@@ -75,15 +84,19 @@ async def test_concept_and_lpmm_sources_filter_results(monkeypatch):
         assert concepts == ["术语A"]
         assert chat_id == "chat-1"
         assert context == "focus"
-        return "concept-hit"
+        return ConceptRetrievalResult(content="concept-hit", learned_jargon={"术语A": "解释"})
 
-    async def fake_query_lpmm_hit(question: str, limit: int = 5):
+    async def fake_fetch_lpmm_hit(question: str, limit: int = 5):
         assert question == "问题"
         assert limit == 2
-        return "你从LPMM知识库中找到以下信息"
+        return {
+            "success": True,
+            "message": "你从LPMM知识库中找到以下信息",
+            "data": {"result": "命中"},
+        }
 
     monkeypatch.setattr(retrieval_sources, "_retrieve_concepts_with_jargon", fake_retrieve_concepts)
-    monkeypatch.setattr(retrieval_sources, "query_lpmm_knowledge", fake_query_lpmm_hit)
+    monkeypatch.setattr(retrieval_sources, "fetch_lpmm_knowledge", fake_fetch_lpmm_hit)
 
     concept_result = await CONCEPT_EXPANSION_SOURCE.collect(
         RetrievalSourceRequest(chat_id="chat-1", concepts=("术语A",), focus_summary="focus")
@@ -93,14 +106,16 @@ async def test_concept_and_lpmm_sources_filter_results(monkeypatch):
     )
 
     assert concept_result.content == "concept-hit"
+    assert concept_result.payload == {"术语A": "解释"}
     assert concept_result.metadata["concepts"] == ["术语A"]
+    assert concept_result.metadata["learned_jargon_count"] == 1
     assert lpmm_result.content == "你从LPMM知识库中找到以下信息"
 
-    async def fake_query_lpmm_miss(question: str, limit: int = 5):
+    async def fake_fetch_lpmm_miss(question: str, limit: int = 5):
         del question, limit
-        return "未找到相关信息"
+        return {"success": False, "message": "未找到相关信息", "data": {}}
 
-    monkeypatch.setattr(retrieval_sources, "query_lpmm_knowledge", fake_query_lpmm_miss)
+    monkeypatch.setattr(retrieval_sources, "fetch_lpmm_knowledge", fake_fetch_lpmm_miss)
     lpmm_miss_result = await LPMM_KNOWLEDGE_SOURCE.collect(
         RetrievalSourceRequest(chat_id="chat-1", question="问题", result_limit=2)
     )

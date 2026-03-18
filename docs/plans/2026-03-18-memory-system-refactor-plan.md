@@ -14,18 +14,49 @@
 
 Current status on 2026-03-18:
 - Document created
-- Phase 1 started
+- Phase 1 completed for current prefetch/retrieval boundaries
+- Phase 2 completed for QA writeback and concept fallback writeback boundaries
 - Unified retrieval source interface landed for:
   - recent query history
   - cached memories
   - concept expansion
   - LPMM prefetch
 - `src/memory_system/memory_retrieval.py` now consumes those paths through a shared orchestrator helper instead of direct ad-hoc calls
+- Shared retrieval backends landed for:
+  - chat history
+  - person profile
+  - person memory
+  - jargon
+  - LPMM knowledge
+- Agent-facing retrieval tools now act as thin adapters over shared backends
+- `src/memory_system/retrieval_analysis.py` now only produces structured QA analysis entries
+- `src/memory_system/memory_ingester.py` is now the explicit async learn/write boundary for:
+  - QA-derived person memory
+  - QA-derived jargon
+  - concept-fallback-derived jargon
+- `src/memory_system/memory_retrieval.py` now returns structured question results internally and only schedules ingestion at the top orchestration boundary
+- `src/memory_system/retrieval_concepts.py` no longer mutates jargon storage during retrieval
+- `src/person_info/person_services.py` now reuses `memory_writer` for actual person-memory persistence
+- Phase 3 completed for person-memory write path decomposition:
+  - `src/person_info/memory_repository.py`
+  - `src/person_info/memory_deduper.py`
+  - `src/person_info/memory_vector_sync.py`
+- `src/person_info/memory_ops.py` now delegates shared write responsibilities to repository/deduper/vector-sync modules instead of duplicating global/group pipelines
+- Phase 4 completed for agent-side source reuse:
+  - `src/memory_system/retrieval_sources.py` now includes agent-facing source adapters for chat history, person profile, person memory, jargon and LPMM
+  - `src/memory_system/retrieval_tools/*.py` now consume retrieval sources instead of calling backends directly
+  - agent tool response formatting now reuses a shared source-result serializer
+- Added regression tests for:
+  - retrieval sources payload contracts
+  - memory ingester routing
+  - memory retrieval ingestion boundary
+  - person memory repository/store behavior
+  - unified person memory write/rollback behavior
+  - agent-facing retrieval source delegation
+  - tool-to-source adapter delegation
 
-Remaining work for Phase 1:
-- move more retrieval paths behind the same source contract
-- decide whether agent tools should directly reuse the same source backends or remain adapters
-- continue shrinking `memory_retrieval.py`
+Next remaining work:
+- None from this document.
 
 ---
 
@@ -160,9 +191,30 @@ This flow must be separate from retrieval. Retrieval should not directly mutate 
 
 ## Current Execution Decision
 
-This session starts **Phase 1** immediately.
+This session has completed the planned **Phase 1-4** refactor track.
 
-Phase 1 is the best first cut because:
-- it improves flow clarity without changing too many persistence semantics
-- it creates reusable contracts for later phases
-- it reduces the ad-hoc nature of `memory_retrieval.py`
+If another round continues, work is no longer blocked by this memory-system plan.
+
+### Post-Plan Progress
+
+Additional refactor completed after the original Phase 1-4 track:
+- `src/memory_system/retrieval_agent.py` was decomposed into explicit helper boundaries for:
+  - iteration prompt building
+  - terminal tool resolution
+  - tool execution planning
+  - observation/tool-message appending
+- Added direct regression coverage for retrieval-agent internals and terminal flow:
+  - `tests/memory/test_retrieval_agent.py`
+- `src/memory_system/retrieval_merge.py` now provides an explicit merge/ranking stage for:
+  - current-turn question hits
+  - cached memory hits
+  - initial concept/context blocks
+- cached-memory payloads are now structured entries instead of only raw prompt blocks, reducing text re-parsing during merge
+- `src/memory_system/retrieval_agent_helpers.py` now owns the helper/runtime details that were previously still living inside `src/memory_system/retrieval_agent.py`
+- Added regression coverage for:
+  - retrieval merge ordering/deduping
+  - structured cached-memory payload flow
+  - retrieval-agent helper extraction compatibility
+
+Current remaining optional follow-ups:
+- None from this document.

@@ -7,6 +7,8 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from uvicorn import Config, Server as UvicornServer
+
+from src.common.net_utils import ensure_tcp_port_available
 from src.common.logger import get_logger
 
 logger = get_logger("webui_server")
@@ -99,6 +101,8 @@ class WebUIServer:
 
     async def start(self):
         """启动服务器"""
+        ensure_tcp_port_available(self.host, self.port, service_name="WebUI服务器")
+
         config = Config(
             app=self.app,
             host=self.host,
@@ -113,6 +117,9 @@ class WebUIServer:
 
         try:
             await self._server.serve()
+        except SystemExit as e:
+            logger.error(f"❌ WebUI 服务器启动失败: {e}")
+            raise RuntimeError(f"WebUI服务器启动失败: {e}") from e
         except Exception as e:
             logger.error(f"❌ WebUI 服务器运行错误: {e}")
             raise

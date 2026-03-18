@@ -229,7 +229,15 @@ class WebSocketLogHandler(logging.Handler):
                 import asyncio
                 from src.webui.logs_ws import broadcast_log
 
-                asyncio.run_coroutine_threadsafe(broadcast_log(log_data), self.loop)
+                if self.loop.is_closed() or not self.loop.is_running():
+                    return
+
+                coroutine = broadcast_log(log_data)
+                try:
+                    asyncio.run_coroutine_threadsafe(coroutine, self.loop)
+                except Exception:
+                    coroutine.close()
+                    raise
             except Exception:
                 # WebSocket 推送失败不影响日志记录
                 pass

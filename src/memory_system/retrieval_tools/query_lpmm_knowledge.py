@@ -2,13 +2,10 @@
 通过LPMM知识库查询信息 - 工具实现
 """
 
-from src.common.logger import get_logger
-from src.config.config import global_config
-from src.chat.knowledge import get_qa_manager
-from .tool_registry import register_memory_retrieval_tool
-from .tool_utils import format_tool_response
+from src.memory_system.retrieval_sources import LPMM_KNOWLEDGE_SOURCE, RetrievalSourceRequest
 
-logger = get_logger("memory_retrieval_tools")
+from .tool_registry import register_memory_retrieval_tool
+from .tool_utils import format_source_result
 
 
 async def query_lpmm_knowledge(query: str, limit: int = 5) -> str:
@@ -20,45 +17,14 @@ async def query_lpmm_knowledge(query: str, limit: int = 5) -> str:
     Returns:
         str: 查询结果
     """
-    try:
-        content = str(query).strip()
-        if not content:
-            return format_tool_response(False, "查询关键词为空")
-
-        try:
-            limit_value = int(limit)
-        except (TypeError, ValueError):
-            limit_value = 5
-        limit_value = max(1, limit_value)
-
-        if not global_config.lpmm_knowledge.enable:
-            logger.debug("LPMM知识库未启用")
-            return format_tool_response(False, "LPMM知识库未启用")
-
-        qa_manager = get_qa_manager()
-        if qa_manager is None:
-            logger.debug("LPMM知识库未初始化，跳过查询")
-            return format_tool_response(False, "LPMM知识库未初始化")
-
-        knowledge_info = await qa_manager.get_knowledge(content, limit=limit_value)
-        logger.debug(f"LPMM知识库查询结果: {knowledge_info}")
-
-        if knowledge_info:
-            return format_tool_response(
-                True,
-                "你从LPMM知识库中找到以下信息",
-                {"query": content, "result": knowledge_info, "limit": limit_value},
-            )
-
-        return format_tool_response(
-            False,
-            f"在LPMM知识库中未找到与“{content}”相关的信息",
-            {"query": content},
+    result = await LPMM_KNOWLEDGE_SOURCE.collect(
+        RetrievalSourceRequest(
+            chat_id="",
+            question=query,
+            result_limit=limit,
         )
-
-    except Exception as e:
-        logger.error(f"LPMM知识库查询失败: {e}")
-        return format_tool_response(False, f"LPMM知识库查询失败：{str(e)}")
+    )
+    return format_source_result(result)
 
 
 def register_tool():

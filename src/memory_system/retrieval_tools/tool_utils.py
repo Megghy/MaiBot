@@ -40,3 +40,15 @@ def format_tool_response(success: bool, message: str = "", data: Optional[Dict[s
         safe_data = json.loads(json.dumps(payload["data"], default=str, ensure_ascii=False))
         payload["data"] = safe_data
         return json.dumps(payload, ensure_ascii=False)
+
+
+def format_source_result(result: Any) -> str:
+    payload = result.payload if isinstance(getattr(result, "payload", None), dict) else {}
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        data = {}
+    return format_tool_response(
+        bool(payload.get("success")),
+        str(payload.get("message") or getattr(result, "content", "") or ""),
+        data,
+    )
