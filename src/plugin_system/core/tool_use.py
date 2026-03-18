@@ -10,6 +10,7 @@ from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
 from src.chat.message_receive.chat_stream import get_chat_manager
 from src.common.logger import get_logger
 from src.runtime.local_component_state import local_component_state
+from src.runtime.agent import AgentMode, AgentProfile, AgentRequest, AgentRunner, PromptBlock, PromptBlockRole
 
 logger = get_logger("tool_use")
 
@@ -121,10 +122,31 @@ class ToolExecutor:
 
         logger.debug(f"{self.log_prefix}开始LLM工具调用分析")
 
-        # 调用LLM进行工具决策
-        response, (reasoning_content, model_name, tool_calls) = await self.llm_model.generate_response_async(
-            prompt=prompt, tools=tools, raise_when_empty=False
+        agent_result = await AgentRunner().run(
+            AgentRequest(
+                request_id=f"tool-executor:{self.chat_id}:{int(time.time() * 1000)}",
+                chat_id=self.chat_id,
+                user_id=None,
+                message=target_message,
+                skill_name="tool_only",
+                prompt_blocks=[
+                    PromptBlock(name="policy", content="", role=PromptBlockRole.SYSTEM),
+                    PromptBlock(name="task", content=prompt, role=PromptBlockRole.USER),
+                ],
+                metadata={"tool_definitions": tools},
+            ),
+            AgentProfile(
+                name="tool_only",
+                skill_name="tool_only",
+                agent_mode=AgentMode.SINGLE_PASS,
+                model_task="tool_use",
+            ),
+            llm_request=self.llm_model,
         )
+        tool_calls = [
+            ToolCall(record.call_id, record.tool_name, record.args)
+            for record in agent_result.tool_calls
+        ]
 
         # 执行工具调用
         tool_results, used_tools = await self.execute_tool_calls(tool_calls)
