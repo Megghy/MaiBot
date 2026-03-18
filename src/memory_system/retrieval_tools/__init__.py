@@ -4,10 +4,11 @@
 """
 
 from .tool_registry import (
-    MemoryRetrievalTool,
-    MemoryRetrievalToolRegistry,
+    MemoryToolSpec,
+    clear_registered_memory_tools,
+    get_registered_memory_tool,
+    get_registered_memory_tools,
     register_memory_retrieval_tool,
-    get_tool_registry,
 )
 
 # 导入所有工具的注册函数
@@ -32,16 +33,17 @@ def init_all_tools():
 def build_agent_tool_registry() -> ToolRegistry:
     init_all_tools()
     registry = ToolRegistry()
-    for tool in get_tool_registry().get_all_tools().values():
+    for tool in get_registered_memory_tools().values():
         registry.register_memory_tool(tool, tags={"memory"})
     return registry
 
 
 __all__ = [
-    "MemoryRetrievalTool",
-    "MemoryRetrievalToolRegistry",
+    "MemoryToolSpec",
+    "clear_registered_memory_tools",
+    "get_registered_memory_tool",
+    "get_registered_memory_tools",
     "register_memory_retrieval_tool",
-    "get_tool_registry",
     "init_all_tools",
     "build_agent_tool_registry",
 ]

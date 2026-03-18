@@ -48,19 +48,19 @@ async def test_prepare_reply_prompt_common_context_uses_reply_time_point(monkeyp
 
     monkeypatch.setattr("src.chat.replyer.base_replyer.get_raw_msg_before_timestamp_with_chat", fake_fetch)
     monkeypatch.setattr("src.chat.replyer.base_replyer.build_person_memory_block", lambda target_person, group_id=None: "")
+    monkeypatch.setattr(
+        "src.chat.replyer.base_replyer.process_target_content",
+        lambda target, platform: (target, False, True, "", target),
+    )
+    monkeypatch.setattr(
+        "src.chat.replyer.base_replyer.build_reply_target_block_text",
+        lambda **kwargs: "reply-target",
+    )
 
     replyer._gather_common_reply_blocks = MethodType(fake_gather, replyer)
     replyer.build_keywords_reaction_prompt = MethodType(fake_keywords, replyer)
     replyer._get_chat_prompt_by_type = MethodType(lambda self, chat_id, target_type: "", replyer)
     replyer.build_chat_history_prompt = MethodType(lambda self, messages: "dialogue", replyer)
-    replyer._process_target_content = MethodType(
-        lambda self, target, platform: (target, False, True, "", target),
-        replyer,
-    )
-    replyer._build_reply_target_block_text = MethodType(
-        lambda self, **kwargs: "reply-target",
-        replyer,
-    )
 
     result = await replyer._prepare_reply_prompt_common_context(
         extra_info="额外信息",

@@ -8,13 +8,7 @@ from src.chat.utils.prompt_builder import global_prompt_manager
 from src.common.logger import get_logger
 from src.config.config import global_config
 from src.llm_models.payload_content.tool_option import ToolParamType
-from src.memory_system.retrieval_agent_helpers import (
-    TerminalToolOutcome,
-    ToolExecutionOutcome,
-    _append_reasoning_summary,
-    _execute_tool_calls,
-    _resolve_terminal_tool_calls,
-)
+from src.memory_system.retrieval_agent_helpers import _append_reasoning_summary
 from src.memory_system.retrieval_format import (
     _append_collected_info,
     _calculate_iteration_budget,
@@ -259,11 +253,7 @@ async def _react_agent_solve_question(
 
 __all__ = [
     "SPECIAL_TOOL_DEFINITIONS",
-    "TerminalToolOutcome",
-    "ToolExecutionOutcome",
     "_build_iteration_prompt",
     "_build_lpmm_hint",
-    "_execute_tool_calls",
     "_react_agent_solve_question",
-    "_resolve_terminal_tool_calls",
 ]

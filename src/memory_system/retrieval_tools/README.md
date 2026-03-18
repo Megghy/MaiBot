@@ -18,11 +18,10 @@ retrieval_tools/
 ## 模块说明
 
 ### `tool_registry.py`
-包含工具注册系统的核心类：
-- `MemoryRetrievalTool`: 工具基类
-- `MemoryRetrievalToolRegistry`: 工具注册器
+包含记忆检索工具描述与注册函数：
+- `MemoryToolSpec`: 工具描述结构
 - `register_memory_retrieval_tool()`: 便捷注册函数
-- `get_tool_registry()`: 获取注册器实例
+- `get_registered_memory_tools()`: 获取已注册工具
 
 ### `tool_utils.py`
 包含所有工具共用的工具函数：
@@ -104,30 +103,24 @@ def init_all_tools():
     register_query_new_tool()  # 添加新工具
 ```
 
-3. 工具会自动：
-   - 出现在 ReAct Agent 的 prompt 中
-   - 在动作类型列表中可用
-   - 被 ReAct Agent 自动调用
+3. 工具会自动被 Agent Kernel 转换成统一 `ToolSpec`，供记忆检索链路调用
 
 ## 使用示例
 
 ```python
-from src.memory_system.retrieval_tools import init_all_tools, get_tool_registry
+from src.memory_system.retrieval_tools import init_all_tools, get_registered_memory_tools
 
 # 初始化所有工具
 init_all_tools()
 
-# 获取工具注册器
-registry = get_tool_registry()
+# 获取已注册工具
+tools = get_registered_memory_tools()
 
 # 获取特定工具
-tool = registry.get_tool("query_chat_history")
+tool = tools["query_chat_history"]
 
 # 执行工具（查询时间点事件）
-result = await tool.execute(time_point="2025-01-15 14:30:00", chat_id="chat123")
-
-# 或者查询关键词
-result = await tool.execute(keyword="小丑AI", chat_id="chat123")
+result = await tool.execute(keyword="回忆", chat_id="chat123")
 
 # 或者查询时间范围
 result = await tool.execute(time_range="2025-01-15 10:00:00 - 2025-01-15 20:00:00", chat_id="chat123")
