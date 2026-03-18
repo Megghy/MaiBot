@@ -82,6 +82,8 @@ class AgentRunner:
                 }
             ],
         )
+        if "reasoning_config" in request.metadata:
+            result.source_summary["reasoning_config"] = request.metadata["reasoning_config"]
 
         llm = llm_request or self._build_llm_request(profile)
         context = ToolExecutionContext(
@@ -130,11 +132,14 @@ class AgentRunner:
         tool_definitions = tool_definitions_override
         if tool_definitions is None:
             tool_definitions = self.tool_registry.get_tool_definitions(profile)
-        response, (reasoning, model_name, tool_calls) = await llm.generate_response_async(
+        llm_kwargs = self._build_single_pass_kwargs(
+            llm,
             prompt=result.user_prompt,
-            tools=tool_definitions or None,
             system_prompt=result.system_prompt or None,
+            tools=tool_definitions or None,
+            reasoning_config=result.source_summary.get("reasoning_config"),
         )
+        response, (reasoning, model_name, tool_calls) = await llm.generate_response_async(**llm_kwargs)
         result.status = AgentStatus.SUCCESS if response or tool_calls else AgentStatus.NO_RESULT
         result.output_text = response or ""
         result.reasoning = reasoning or ""
@@ -335,3 +340,22 @@ class AgentRunner:
             messages.append(MessageBuilder().set_role(RoleType.User).add_text_content(user_prompt).build())
         messages.extend(conversation_messages)
         return messages
+
+    @staticmethod
+    def _build_single_pass_kwargs(
+        llm: Any,
+        *,
+        prompt: str,
+        system_prompt: str | None,
+        tools: list[dict[str, Any]] | None,
+        reasoning_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "prompt": prompt,
+            "tools": tools,
+            "system_prompt": system_prompt,
+        }
+        signature = inspect.signature(llm.generate_response_async)
+        if reasoning_config is not None and "reasoning_config" in signature.parameters:
+            kwargs["reasoning_config"] = reasoning_config
+        return kwargs

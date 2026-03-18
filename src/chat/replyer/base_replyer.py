@@ -9,6 +9,7 @@ from src.common.data_models.database_data_model import DatabaseMessages
 from src.common.data_models.info_data_model import ActionPlannerInfo
 from src.common.data_models.llm_data_model import LLMGenerationDataModel
 from src.config.config import global_config, model_config
+from src.llm_models.payload_content.tool_option import ToolCall
 from src.llm_models.utils_model import LLMRequest
 from src.chat.message_receive.chat_stream import ChatStream
 from src.chat.message_receive.message import MessageRecv, MessageSending, Seg, UserInfo
@@ -29,24 +30,19 @@ from src.chat.replyer.replyer_helpers import (
     build_mood_state_prompt_block,
     build_personality_prompt_text,
     build_relation_info_block,
-    build_tool_results_block,
-    format_tool_results,
-    get_prompt_info_block,
     get_chat_prompt_by_type,
-    parse_chat_prompt_config_to_chat_id,
 )
 from src.chat.replyer.target_utils import (
-    analyze_target_content,
     build_reply_target_block_text,
     parse_reply_target,
     process_target_content,
-    replace_picids_with_descriptions,
 )
 from src.plugin_system.base.component_types import ActionInfo, EventType
 from src.chat.replyer.prompt.lpmm_prompt import init_lpmm_prompt
 from src.chat.replyer.prompt.replyer_prompt import init_replyer_prompt
 from src.chat.replyer.prompt.rewrite_prompt import init_rewrite_prompt
 from src.memory_system.memory_retrieval import init_memory_retrieval_prompt
+from src.runtime.agent import AgentMode, AgentProfile, AgentRequest, AgentRunner, ContextAssembler
 
 # 初始化 Prompt
 init_lpmm_prompt()
@@ -310,7 +306,6 @@ class BaseReplyer:
             from src.llm_models.payload_content.tool_option import ToolParamType
 
             tools = None
-            tool_calls = None
 
             if allow_refuse:
                 refuse_tool = {
@@ -320,9 +315,39 @@ class BaseReplyer:
                 }
                 tools = [refuse_tool]
 
-            content, (reasoning_content, model_name, tool_calls) = await self.express_model.generate_response_async(
-                prompt, tools=tools, system_prompt=system_prompt, reasoning_config=reasoning_config
+            assembled = ContextAssembler().from_parts(
+                system_parts={"policy": system_prompt or ""},
+                user_parts={"context": prompt},
             )
+            agent_result = await AgentRunner().run(
+                AgentRequest(
+                    request_id=f"reply:{self.chat_stream.stream_id}:{int(time.time() * 1000)}",
+                    chat_id=self.chat_stream.stream_id,
+                    user_id=None,
+                    message=prompt,
+                    skill_name="reply_default",
+                    prompt_blocks=assembled.blocks,
+                    metadata={
+                        "tool_definitions": tools,
+                        "reasoning_config": reasoning_config,
+                    },
+                ),
+                AgentProfile(
+                    name="reply_default",
+                    skill_name="reply_default",
+                    agent_mode=AgentMode.SINGLE_PASS,
+                    model_task="replyer",
+                ),
+                llm_request=self.express_model,
+                chat_stream=self.chat_stream,
+            )
+            content = agent_result.output_text
+            reasoning_content = agent_result.reasoning
+            model_name = agent_result.model_name
+            tool_calls = [
+                ToolCall(record.call_id, record.tool_name, record.args)
+                for record in agent_result.tool_calls
+            ]
 
             # 检查是否拒绝回复
             if allow_refuse and tool_calls:
@@ -472,18 +497,6 @@ class BaseReplyer:
     async def build_mood_state_prompt(self) -> str:
         return await build_mood_state_prompt_block(self.chat_stream.stream_id)
 
-    def _format_tool_results(self, tool_results: List[Dict[str, Any]]) -> str:
-        return format_tool_results(tool_results)
-
-    async def build_tool_results(self, chat_history: str, sender: str, target: str, enable_tool: bool = True) -> str:
-        return await build_tool_results_block(
-            self.tool_executor,
-            chat_history,
-            sender,
-            target,
-            enable_tool=enable_tool,
-        )
-
     def _parse_reply_target(self, target_message: Optional[str]) -> Tuple[str, str]:
         return parse_reply_target(target_message)
 
@@ -510,12 +523,6 @@ class BaseReplyer:
             pic_part=pic_part,
             text_part=text_part,
         )
-
-    def _replace_picids_with_descriptions(self, text: str) -> str:
-        return replace_picids_with_descriptions(text)
-
-    def _analyze_target_content(self, target: str) -> Tuple[bool, bool, str, str]:
-        return analyze_target_content(target)
 
     async def build_keywords_reaction_prompt(self, target: Optional[str]) -> str:
         return build_keywords_reaction_prompt_text(target)
@@ -628,14 +635,8 @@ class BaseReplyer:
     async def build_personality_prompt(self) -> str:
         return build_personality_prompt_text()
 
-    def _parse_chat_prompt_config_to_chat_id(self, chat_prompt_str: str) -> Optional[tuple[str, str]]:
-        return parse_chat_prompt_config_to_chat_id(chat_prompt_str)
-
     def _get_chat_prompt_by_type(self, chat_id: str, target_type: str) -> str:
         return get_chat_prompt_by_type(chat_id, target_type, global_config.experimental.chat_prompts)
-
-    async def get_prompt_info(self, message: str, sender: str, target: str):
-        return await get_prompt_info_block(self.tool_executor, message, sender, target)
 
     async def build_relation_info(self, chat_content: str, sender: str):
         return await build_relation_info_block(chat_content, sender)
