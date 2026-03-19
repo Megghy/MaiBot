@@ -11,6 +11,17 @@ BASE_REPLY_FORMAT_POLICY = """
 只输出最终回复内容。
 不要输出解释、前后缀、角色名、引号、括号、项目符号、at、@、表情包或 emoji。
 回复保持自然、口语化，不要写成分析说明。
+
+【时间约束】
+- 简单问候（早/晚上好）→ 别提超过30分钟前的具体事
+- 超过1小时的话题 → 别突然翻出来说
+- 这不是要你必须接话，而是避免时间错位
+
+【随意性】
+- 想说啥说啥，不用非得接话
+- 可以突然提起别的，可以答非所问
+- 真人聊天本来就是随机的
+
 如果你确实想连续发送多条消息，请直接使用换行分隔，不要用空格来暗示多条消息。
 """.strip()
 
@@ -30,6 +41,20 @@ GREETING_PATTERNS = (
     "嗨",
 )
 QUESTION_MARKERS = ("?", "？", "吗", "嘛", "么", "啥", "什么", "怎么", "咋", "为什么", "哪", "谁", "几", "推荐")
+
+# 公共提示词片段
+COMMON_TIME_PRIORITY = """看消息的顺序:
+1. 当前这条说了啥
+2. 5分钟内的对话
+3. 更早的记忆（想提就提，不想提就算了）
+不用非得按顺序来，想到啥说啥。"""
+
+COMMON_STYLE_GUIDE = """风格:
+- 想调侃就调侃，想玩梗就玩梗
+- 但别连续用同一个套路
+- 可以突然说些不相关的，这很正常"""
+
+MULTI_MESSAGE_HINT = "想发两条就换行，别用空格装多条"
 
 
 def _join_non_empty(*parts: str) -> str:
@@ -130,125 +155,71 @@ def build_chat_customization_block(*, chat_prompt_block: str, keywords_reaction_
 
 
 def _build_reply_scene_budget(reply_scene: str) -> str:
-    common_lines = [
-        "信息优先级:",
-        "1. 先看最新消息本身",
-        "2. 再看最近几轮聊天",
-        "3. 再参考规划结论",
-        "4. 最后才参考更早的记忆和背景",
-        "如果后面的信息和最新消息的直觉不一致，以最新消息为准。",
-        "",
-        "风格预算:",
-        "- 最多一个调侃点",
-        "- 最多一个轻微玩梗点",
-        "- 不要同时打招呼、翻旧账、再开新话题",
-    ]
-    if reply_scene == "greeting":
-        common_lines.extend(
-            [
-                "",
-                "复杂度预算:",
-                "- 这是轻量寒暄场景，默认短答",
-                "- 默认不要主动引用更早的话题",
-                "- 只表达一个意思",
-            ]
-        )
-    elif reply_scene == "question":
-        common_lines.extend(
-            [
-                "",
-                "复杂度预算:",
-                "- 这是问答场景，优先回答问题本身",
-                "- 先答核心点，再决定要不要补一句延伸",
-                "- 不要因为想显得有趣而偏题",
-            ]
-        )
-    else:
-        common_lines.extend(
-            [
-                "",
-                "复杂度预算:",
-                "- 回复保持低复杂度",
-                "- 先回应当前点，不要无故扩写",
-            ]
-        )
-    return "\n".join(common_lines)
+    scene_specific = {
+        "greeting": "这看起来是打招呼:\n- 可以简单回，也可以顺便说点别的\n- 别提太久之前的具体事就行",
+        "question": "这看起来是提问:\n- 想答就答，不想答也可以岔开话题\n- 真人也不是每次都正经回答",
+    }
+    specific = scene_specific.get(reply_scene, "普通聊天:\n- 想说啥说啥\n- 可以接话，也可以说点别的")
+    return f"{COMMON_TIME_PRIORITY}\n\n{COMMON_STYLE_GUIDE}\n\n{specific}"
+
+
+def _format_example(good: list[str], bad: list[str], context: list[str] = None) -> str:
+    """格式化示例，减少重复代码"""
+    lines = ["参考:" if not context else "参考（注意时间）:"]
+    if context:
+        lines.extend(context)
+    lines.extend(f"✓ {ex}" for ex in good)
+    lines.extend(f"✗ {ex}" for ex in bad)
+    return "\n".join(lines)
 
 
 def _build_reply_few_shots(reply_scene: str) -> str:
     if reply_scene == "greeting":
-        return "\n".join(
-            [
-                "示例:",
-                "用户: 晚上好麦麦",
-                "好输出: 晚上好 又来打卡了啊",
-                "好输出: 晚上好 这会儿才冒头啊",
-                "坏输出: 晚上好 你这一天打卡挺勤快啊 中午刚吃完咖喱 晚上又来报到了",
-            ]
-        )
+        # greeting场景比较特殊，有时间上下文，手动构建
+        return "\n".join([
+            "参考（注意时间）:",
+            "[中午12:30] 用户: 吃啥好",
+            "[中午12:35] 你: 咖喱或者黄焖",
+            "[晚上20:00] 用户: 晚上好麦麦",
+            "✓ 晚上好 又来了",
+            "✓ 嗯 这会儿才冒头",
+            "✗ 晚上好 中午刚吃完咖喱 晚上又来了（别翻中午的事）",
+            "",
+            "[早上08:00] 用户: 早",
+            "[晚上21:00] 用户: 在吗",
+            "✓ 在 咋了",
+            "✗ 在 早上不是打过招呼了吗（时间跨度太大）",
+        ])
     if reply_scene == "question":
-        return "\n".join(
-            [
-                "示例:",
-                "用户: 晚饭吃什么好",
-                "好输出: 去吃咖喱或者黄焖呗",
-                "好输出: 你要省事就点个盖饭",
-                "坏输出: 晚饭吃什么好 让我先回忆一下今天白天我们聊过什么再决定",
-            ]
+        return _format_example(
+            good=["咖喱或者黄焖呗", "懒得想就点盖饭"],
+            bad=["让我先回忆一下今天白天聊过什么再决定（别整这些）"],
+            context=["用户: 晚饭吃什么好"],
         )
     if reply_scene == "light_touch":
-        return "\n".join(
-            [
-                "示例:",
-                "用户: 打卡",
-                "好输出: 又来刷存在感了啊",
-                "好输出: 行 行 行 看到你了",
-                "坏输出: 你今天从中午到晚上都在认真打卡 这个习惯真稳定",
-            ]
+        return _format_example(
+            good=["又来刷存在感了", "行 看到你了"],
+            bad=["你今天从中午到晚上都在认真打卡（别总结一天）"],
+            context=["用户: 打卡"],
         )
-    return "\n".join(
-        [
-            "示例:",
-            "用户: 我刚到家",
-            "好输出: 行 先歇会儿吧",
-            "好输出: 到家就行 赶紧歇着",
-            "坏输出: 根据你今天之前的全部聊天记录来看 你现在应该已经很累了",
-        ]
+    return _format_example(
+        good=["行 先歇会儿吧", "到家就行"],
+        bad=["根据你今天之前的全部聊天记录来看 你现在应该很累了（别分析）"],
+        context=["用户: 我刚到家"],
     )
 
 
 def _build_task_intro(*, reply_scene: str, sender_name: str | None = None) -> list[str]:
-    if reply_scene == "greeting":
-        return [
-            "任务:",
-            "- 这是问候或轻寒暄场景",
-            "- 优先就近回应，不主动翻旧话题",
-            "- 回复尽量短、自然、像顺手接一句",
-            "- 如果确实要连续发两条，请用换行分隔，不要靠空格或停顿暗示多条消息",
-        ]
-    if reply_scene == "question":
-        return [
-            "任务:",
-            f"- 你正在回复 {sender_name}" if sender_name else "- 你正在回复对方",
-            "- 这是明确提问场景",
-            "- 先回答问题，再考虑是否补一句自然延伸",
-            "- 如果确实要连续发两条，请用换行分隔，不要靠空格或停顿暗示多条消息",
-        ]
-    if reply_scene == "light_touch":
-        return [
-            "任务:",
-            f"- 你正在回复 {sender_name}" if sender_name else "- 你正在回复对方",
-            "- 这是短消息或轻互动场景",
-            "- 给出轻量、顺手、不过度展开的回应",
-            "- 如果确实要连续发两条，请用换行分隔，不要靠空格或停顿暗示多条消息",
-        ]
-    return [
-        "任务:",
-        f"- 你正在回复 {sender_name}" if sender_name else "- 你正在回复对方",
-        "- 阅读聊天记录并结合上面的参考信息",
-        "- 直接给出一条自然、连贯、低复杂度的回复",
-        "- 如果确实要连续发两条，请用换行分隔，不要靠空格或停顿暗示多条消息",
-    ]
+    target = "现在回一句:" if reply_scene == "greeting" else f"现在回 {sender_name or '对方'}:"
+
+    scene_hints = {
+        "greeting": ["看起来是打招呼", "想简单回就简单回，想多说两句也行"],
+        "question": ["看起来是提问", "想答就答，想岔开话题也可以"],
+        "light_touch": ["短消息", "随便回点啥就行"],
+    }
+
+    hints = scene_hints.get(reply_scene, ["看看聊天记录", "想说啥说啥"])
+    return [target] + [f"- {h}" for h in hints] + [f"- {MULTI_MESSAGE_HINT}"]
 
 
 def build_group_reply_task(*, reply_scene: str) -> str:
@@ -257,7 +228,7 @@ def build_group_reply_task(*, reply_scene: str) -> str:
         + [
             _build_reply_scene_budget(reply_scene),
             _build_reply_few_shots(reply_scene),
-            "现在请直接给出回复。",
+            "你说:",
         ]
     )
 
@@ -268,7 +239,7 @@ def build_private_reply_task(sender_name: str, *, reply_scene: str) -> str:
         + [
             _build_reply_scene_budget(reply_scene),
             _build_reply_few_shots(reply_scene),
-            "现在请直接给出回复。",
+            "你说:",
         ]
     )
 
@@ -290,7 +261,7 @@ def build_private_self_reply_task() -> str:
             "- 在刚刚自己的发言基础上继续补充，不要重复背景说明",
             "- 回复保持自然、简短、连续，像同一人紧接着继续说话",
             "- 不要突然切到更早的话题，不要把补充说明写成总结",
-            "现在请直接给出回复。",
+            "现在, 你说:",
         ]
     )
 
