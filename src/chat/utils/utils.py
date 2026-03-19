@@ -205,7 +205,7 @@ async def get_embedding(text, request_type="embedding") -> Optional[List[float]]
 
 def split_into_sentences_w_remove_punctuation(text: str) -> list[str]:
     """将文本分割成句子，并根据概率合并
-    1. 识别分割点（, ， 。 ; 空格），但如果分割点左右都是英文字母则不分割。
+    1. 识别分割点（, ， 。 ; 换行），单个空格不参与消息边界判断。
     2. 将文本分割成 (内容, 分隔符) 的元组。
     3. 根据原始文本长度计算合并概率，概率性地合并相邻段落。
     注意：此函数假定颜文字已在上层被保护。
@@ -229,7 +229,7 @@ def split_into_sentences_w_remove_punctuation(text: str) -> list[str]:
         return list(text) if random.random() < 0.01 else [text]
 
     # 定义分隔符
-    separators = {"，", ",", " ", "。", ";", "\n"}
+    separators = {"，", ",", "。", ";", "\n"}
     segments = []
     current_segment = ""
 
@@ -238,29 +238,9 @@ def split_into_sentences_w_remove_punctuation(text: str) -> list[str]:
     while i < len(text):
         char = text[i]
         if char in separators:
-            # 检查分割条件：如果空格左右都是英文字母、数字，或数字和英文之间，则不分割（仅对空格应用此规则）
-            can_split = True
-            if 0 < i < len(text) - 1:
-                prev_char = text[i - 1]
-                next_char = text[i + 1]
-                # 只对空格应用"不分割数字和数字、数字和英文、英文和数字、英文和英文之间的空格"规则
-                if char == " ":
-                    prev_is_alnum = prev_char.isdigit() or is_english_letter(prev_char)
-                    next_is_alnum = next_char.isdigit() or is_english_letter(next_char)
-                    if prev_is_alnum and next_is_alnum:
-                        can_split = False
-
-            if can_split:
-                # 只有当当前段不为空时才添加
-                if current_segment:
-                    segments.append((current_segment, char))
-                # 如果当前段为空，但分隔符是空格，则也添加一个空段（保留空格）
-                elif char == " ":
-                    segments.append(("", char))
-                current_segment = ""
-            else:
-                # 不分割，将分隔符加入当前段
-                current_segment += char
+            if current_segment:
+                segments.append((current_segment, char))
+            current_segment = ""
         else:
             current_segment += char
         i += 1
@@ -274,7 +254,7 @@ def split_into_sentences_w_remove_punctuation(text: str) -> list[str]:
 
     # 如果分割后为空（例如，输入全是分隔符且不满足保留条件），恢复颜文字并返回
     if not segments:
-        return [text] if text else []  # 如果原始文本非空，则返回原始文本（可能只包含未被分割的字符或颜文字占位符）
+        return [text] if text else []
 
     # 2. 概率合并
     if len_text < 12:
