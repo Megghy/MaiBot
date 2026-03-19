@@ -10,6 +10,7 @@ SUPPORTED_LIVE_MODEL_TASKS = {
     "utils_small",
     "tool_use",
     "replyer",
+    "reply_splitter",
     "planner",
     "expression",
     "lpmm_entity_extract",
@@ -88,9 +89,21 @@ def pytest_collection_modifyitems(config, items):
 
 def pytest_generate_tests(metafunc):
     if "live_model_case" not in metafunc.fixturenames:
-        return
-
+        if "live_replyer_model_name" not in metafunc.fixturenames:
+            return
     from src.config.config import model_config
+
+    if "live_replyer_model_name" in metafunc.fixturenames:
+        replyer_models = model_config.model_task_config.replyer.model_list
+        if not replyer_models:
+            raise pytest.UsageError("replyer 任务没有可用模型，无法运行 live reply 场景测试。")
+        selected_replyer_models = (
+            replyer_models if metafunc.config.getoption("--live-model-all-models") else replyer_models[:1]
+        )
+        metafunc.parametrize("live_replyer_model_name", selected_replyer_models, ids=selected_replyer_models)
+
+    if "live_model_case" not in metafunc.fixturenames:
+        return
 
     selected_tasks = metafunc.config.getoption("--live-model-task") or ["replyer"]
     test_all_models = metafunc.config.getoption("--live-model-all-models")

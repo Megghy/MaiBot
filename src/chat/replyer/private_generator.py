@@ -10,6 +10,7 @@ from src.chat.replyer.prompt.replyer_prompt import (
     build_chat_customization_block,
     build_chat_history_block,
     build_planner_hint_block,
+    detect_reply_scene,
     build_private_identity_block,
     build_private_reply_task,
     build_private_self_reply_target,
@@ -65,6 +66,14 @@ class PrivateReplyer(BaseReplyer):
                 keywords_reaction_prompt=prompt_data["keywords_reaction_prompt"],
             ),
         }
+        reply_scene = detect_reply_scene(
+            target=prompt_data["target"],
+            reply_reason=reply_reason,
+            is_self_continuation=(
+                global_config.bot.qq_account == prompt_data["user_id"]
+                and self.chat_stream.platform == global_config.bot.platform
+            ),
+        )
 
         if global_config.bot.qq_account == prompt_data["user_id"] and self.chat_stream.platform == global_config.bot.platform:
             user_parts["reply_target"] = build_private_self_reply_target(
@@ -75,7 +84,7 @@ class PrivateReplyer(BaseReplyer):
         else:
             user_parts["reply_target"] = prompt_data["reply_target_block"]
             user_parts["planner_hint"] = build_planner_hint_block(prompt_data["planner_reasoning"])
-            user_parts["task"] = build_private_reply_task(prompt_data["sender"])
+            user_parts["task"] = build_private_reply_task(prompt_data["sender"], reply_scene=reply_scene)
 
         assembled = ContextAssembler().from_parts(
             system_parts={

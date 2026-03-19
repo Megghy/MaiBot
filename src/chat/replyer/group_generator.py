@@ -10,6 +10,7 @@ from src.chat.replyer.prompt.replyer_prompt import (
     BASE_REPLY_SAFETY_POLICY,
     build_chat_customization_block,
     build_chat_history_block,
+    detect_reply_scene,
     build_group_identity_block,
     build_group_reply_task,
     build_planner_hint_block,
@@ -57,6 +58,10 @@ class DefaultReplyer(BaseReplyer):
             enable_tool=enable_tool,
             reply_time_point=reply_time_point,
         )
+        reply_scene = detect_reply_scene(
+            target=prompt_data["target"],
+            reply_reason=reply_reason,
+        )
 
         assembled = ContextAssembler().from_parts(
             system_parts={
@@ -89,7 +94,7 @@ class DefaultReplyer(BaseReplyer):
                     chat_prompt_block=prompt_data["chat_prompt_block"],
                     keywords_reaction_prompt=prompt_data["keywords_reaction_prompt"],
                 ),
-                "task": build_group_reply_task(),
+                "task": build_group_reply_task(reply_scene=reply_scene),
             },
         )
 

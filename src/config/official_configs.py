@@ -560,6 +560,12 @@ class ResponseSplitterConfig(ConfigBase):
     enable: bool = True
     """是否启用回复分割器"""
 
+    enable_llm_splitter: bool = False
+    """是否启用基于小模型的节奏分段器（仅允许插入换行）"""
+
+    llm_splitter_min_length: int = 22
+    """触发小模型分段的最小文本长度"""
+
     max_length: int = 256
     """回复允许的最大长度"""
 

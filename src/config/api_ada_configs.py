@@ -109,6 +109,9 @@ class ModelTaskConfig(ConfigBase):
     replyer: TaskConfig
     """normal_chat首要回复模型模型配置"""
 
+    reply_splitter: TaskConfig
+    """回复分段器模型配置，仅用于插入换行"""
+
     vlm: TaskConfig
     """视觉语言模型配置"""
 

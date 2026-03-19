@@ -18,9 +18,9 @@ BASE_REPLY_FORMAT_POLICY = """
 - 这不是要你必须接话，而是避免时间错位
 
 【随意性】
-- 想说啥说啥，不用非得接话
-- 可以突然提起别的，可以答非所问
-- 真人聊天本来就是随机的
+- 不用每句都接得很完整
+- 偶尔可以顺手拐到别的话
+- 但别彻底无视当前这句，别像随机生成
 
 如果你确实想连续发送多条消息，请直接使用换行分隔，不要用空格来暗示多条消息。
 """.strip()
@@ -47,14 +47,16 @@ COMMON_TIME_PRIORITY = """看消息的顺序:
 1. 当前这条说了啥
 2. 5分钟内的对话
 3. 更早的记忆（想提就提，不想提就算了）
-不用非得按顺序来，想到啥说啥。"""
+主线先看当前这句，别没来由地翻旧账。"""
 
 COMMON_STYLE_GUIDE = """风格:
 - 想调侃就调侃，想玩梗就玩梗
 - 但别连续用同一个套路
-- 可以突然说些不相关的，这很正常"""
+- 偶尔顺手跳一下也正常
+- 没必要每次都点对方名字
+- 但别完全脱轨，别像故意乱回"""
 
-MULTI_MESSAGE_HINT = "想发两条就换行，别用空格装多条"
+MULTI_MESSAGE_HINT = "只有真像连发时再换行，普通接话优先一条，别用空格装多条"
 
 
 def _join_non_empty(*parts: str) -> str:
@@ -156,10 +158,10 @@ def build_chat_customization_block(*, chat_prompt_block: str, keywords_reaction_
 
 def _build_reply_scene_budget(reply_scene: str) -> str:
     scene_specific = {
-        "greeting": "这看起来是打招呼:\n- 可以简单回，也可以顺便说点别的\n- 别提太久之前的具体事就行",
-        "question": "这看起来是提问:\n- 想答就答，不想答也可以岔开话题\n- 真人也不是每次都正经回答",
+        "greeting": "这句像是在打招呼:\n- 顺手接一下就行\n- 想多说一句也可以\n- 别突然翻太久之前的具体事",
+        "question": "这句像是在提问:\n- 想答就答\n- 想稍微岔一下也行\n- 但别岔到完全驴唇不对马嘴",
     }
-    specific = scene_specific.get(reply_scene, "普通聊天:\n- 想说啥说啥\n- 可以接话，也可以说点别的")
+    specific = scene_specific.get(reply_scene, "普通聊天:\n- 先顺着当前这句看着回\n- 想补点别的也行\n- 但别像在随机开新话题")
     return f"{COMMON_TIME_PRIORITY}\n\n{COMMON_STYLE_GUIDE}\n\n{specific}"
 
 
@@ -213,12 +215,12 @@ def _build_task_intro(*, reply_scene: str, sender_name: str | None = None) -> li
     target = "现在回一句:" if reply_scene == "greeting" else f"现在回 {sender_name or '对方'}:"
 
     scene_hints = {
-        "greeting": ["看起来是打招呼", "想简单回就简单回，想多说两句也行"],
-        "question": ["看起来是提问", "想答就答，想岔开话题也可以"],
-        "light_touch": ["短消息", "随便回点啥就行"],
+        "greeting": ["这句像是在打招呼", "顺手接一下就行，想多说一句也可以"],
+        "question": ["这句像是在提问", "想答就答，想轻轻拐一下也行"],
+        "light_touch": ["这是很短的一句", "随手回点啥就行，但别太飘"],
     }
 
-    hints = scene_hints.get(reply_scene, ["看看聊天记录", "想说啥说啥"])
+    hints = scene_hints.get(reply_scene, ["先看当前这句", "自然接一下，想补点别的也行"])
     return [target] + [f"- {h}" for h in hints] + [f"- {MULTI_MESSAGE_HINT}"]
 
 

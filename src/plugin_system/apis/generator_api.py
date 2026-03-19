@@ -17,6 +17,7 @@ from src.chat.replyer.group_generator import DefaultReplyer
 from src.chat.replyer.private_generator import PrivateReplyer
 from src.chat.message_receive.chat_stream import ChatStream
 from src.chat.utils.utils import process_llm_response
+from src.chat.utils.reply_splitter_llm import maybe_split_reply_with_llm
 from src.chat.replyer.replyer_manager import replyer_manager
 from src.plugin_system.base.component_types import ActionInfo
 
@@ -147,7 +148,15 @@ async def generate_reply(
             return False, None
         reply_set: Optional[ReplySetModel] = None
         if content := llm_response.content:
-            reply_set = process_human_text(content, enable_splitter, enable_chinese_typo)
+            target_message = ""
+            if reply_message:
+                target_message = reply_message.processed_plain_text or reply_message.display_message or ""
+            reply_set = await process_human_text(
+                content,
+                enable_splitter,
+                enable_chinese_typo,
+                target_message=target_message,
+            )
         llm_response.reply_set = reply_set
         logger.debug(f"[GeneratorAPI] 回复生成成功，生成了 {len(reply_set) if reply_set else 0} 个回复项")
 
@@ -217,7 +226,12 @@ async def rewrite_reply(
         )
         reply_set: Optional[ReplySetModel] = None
         if success and llm_response and (content := llm_response.content):
-            reply_set = process_human_text(content, enable_splitter, enable_chinese_typo)
+            reply_set = await process_human_text(
+                content,
+                enable_splitter,
+                enable_chinese_typo,
+                target_message=reply_to,
+            )
         llm_response.reply_set = reply_set
         if success:
             logger.info(f"[GeneratorAPI] 重写回复成功，生成了 {len(reply_set) if reply_set else 0} 个回复项")
@@ -234,19 +248,27 @@ async def rewrite_reply(
         return False, None
 
 
-def process_human_text(content: str, enable_splitter: bool, enable_chinese_typo: bool) -> Optional[ReplySetModel]:
+async def process_human_text(
+    content: str,
+    enable_splitter: bool,
+    enable_chinese_typo: bool,
+    *,
+    target_message: str = "",
+) -> Optional[ReplySetModel]:
     """将文本处理为更拟人化的文本
 
     Args:
         content: 文本内容
         enable_splitter: 是否启用消息分割器
         enable_chinese_typo: 是否启用错字生成器
+        target_message: 当前对方消息，用于小模型判断发送节奏
     """
     if not isinstance(content, str):
         raise ValueError("content 必须是字符串类型")
     try:
         reply_set = ReplySetModel()
-        processed_response = process_llm_response(content, enable_splitter, enable_chinese_typo)
+        processed_content = await maybe_split_reply_with_llm(content, target_message=target_message)
+        processed_response = process_llm_response(processed_content, enable_splitter, enable_chinese_typo)
 
         for text, delay in processed_response:
             reply_set.add_text_content(text, delay=delay)

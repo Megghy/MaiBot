@@ -5,15 +5,12 @@ from maim_message import MessageServer
 from src.config.config import global_config
 from src.common.logger import get_logger
 from src.common.server import get_global_server, Server
-from rich.traceback import install
 
 # 导入消息API和traceback模块
 from src.common.message import get_global_api
 from src.runtime.startup import build_service_tasks, initialize_runtime_services, setup_webui_server
 
 # 插件系统现在使用统一的插件加载器
-
-install(extra_lines=3)
 
 logger = get_logger("main")
 

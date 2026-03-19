@@ -21,6 +21,8 @@ def _build_single_model_task(task_name: str, model_name: str) -> TaskConfig:
 def _build_live_prompt(task_name: str) -> str:
     if task_name == "replyer":
         return "你正在群聊中聊天。有人说：晚上好麦麦。请只回复一条自然、简短的中文消息。"
+    if task_name == "reply_splitter":
+        return "原文：都这个点了食堂还有啥好吃的 要不点外卖凑合一下 或者便利店买点\n只允许插入换行，不要改任何其他字符。"
     if task_name == "planner":
         return "你是一个决策模型。请只回复 OK。"
     if task_name == "tool_use":
@@ -56,4 +58,3 @@ async def test_live_model_request_against_configured_models(live_model_case):
     assert used_model == model_name
     assert isinstance(reasoning, str)
     assert response.strip() or tool_calls
-
