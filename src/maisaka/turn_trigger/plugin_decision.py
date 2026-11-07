@@ -118,6 +118,8 @@ def build_turn_request(runtime: MaisakaHeartFlowChatting, messages: list[Session
                 "reply_to": item.original_message.reply_to,
                 "text": item.processed_plain_text,
                 "is_self": item.source == "guided_reply",
+                "is_at": bool(item.original_message.is_at),
+                "is_mentioned": bool(item.original_message.is_mentioned),
                 "timestamp": item.timestamp.timestamp(),
             }
             for item in runtime._chat_history[-40:]
