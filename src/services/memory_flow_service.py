@@ -246,7 +246,26 @@ class PersonFactWritebackService:
             return None
         person_id = get_person_id(platform, user_id)
         person = Person(person_id=person_id)
-        return person if person.is_known else None
+        if not person.is_known:
+            nickname = str(
+                getattr(user_info, "user_nickname", "")
+                or getattr(user_info, "user_cardname", "")
+                or getattr(message, "user_nickname", "")
+                or user_id
+            ).strip()
+            group_info = getattr(getattr(message, "message_info", None), "group_info", None)
+            group_id = str(getattr(group_info, "group_id", "") or getattr(message, "group_id", "") or "").strip() or None
+            group_nick_name = str(
+                getattr(user_info, "user_cardname", "") or getattr(message, "user_cardname", "") or ""
+            ).strip() or None
+            person = Person.register_person(
+                platform=platform,
+                user_id=user_id,
+                nickname=nickname,
+                group_id=group_id,
+                group_nick_name=group_nick_name,
+            )
+        return person if person and person.is_known else None
 
     def _collect_user_evidence(self, message: Any, person: Person) -> PersonFactEvidence:
         session = getattr(message, "session", None)
@@ -1017,7 +1036,11 @@ class MemoryAutomationService:
     async def on_incoming_message(self, message: Any) -> None:
         if not self._started:
             await self.start()
-        await self._run_message_tasks(self._observe_sender_identity(message), self.image_writeback.enqueue(message))
+        await self._run_message_tasks(
+            self._observe_sender_identity(message),
+            self.image_writeback.enqueue(message),
+            self.chat_summary_writeback.enqueue(message),
+        )
 
     async def on_message_sent(self, message: Any) -> None:
         if not self._started:

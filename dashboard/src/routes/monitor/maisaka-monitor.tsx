@@ -81,6 +81,7 @@ import type {
   ReplierResponseEvent,
   TimingGateResultEvent,
   ToolExecutionEvent,
+  TurnDecisionEvent,
 } from '@/lib/maisaka-monitor-client'
 import type { SessionInfo, StageStatusInfo, TimelineEntry } from './use-maisaka-monitor'
 import { StageStatusLabel } from './StageStatusLabel'
@@ -1061,6 +1062,219 @@ function TimingGateCard({ data }: { data: TimingGateResultEvent }) {
         {data.content && <CollapsibleText text={data.content} maxLines={3} />}
       </div>
     </div>
+  )
+}
+
+const TURN_DECISION_ACTIONS: Record<string, { label: string; badgeClass: string }> = {
+  reply: {
+    label: '回复',
+    badgeClass: 'bg-emerald-500/12 text-emerald-600 dark:text-emerald-400',
+  },
+  planner: {
+    label: '转交 Planner',
+    badgeClass: 'bg-sky-500/12 text-sky-600 dark:text-sky-400',
+  },
+  wait: {
+    label: '等待续句',
+    badgeClass: 'bg-amber-500/12 text-amber-600 dark:text-amber-400',
+  },
+  consume: {
+    label: '静默已读',
+    badgeClass: 'bg-muted text-muted-foreground',
+  },
+}
+
+const TURN_DECISION_TONES: Record<string, string> = {
+  normal: 'bg-muted/70 text-muted-foreground',
+  sarcastic: 'bg-amber-500/12 text-amber-600 dark:text-amber-400',
+  hostile: 'bg-rose-500/12 text-rose-600 dark:text-rose-400',
+}
+
+const PROBABILITY_DIMENSIONS = ['action', 'tone', 'conversation', 'execution'] as const
+
+function resolveActionConfidence(data: TurnDecisionEvent): number | null {
+  const probs = data.probabilities
+  if (!probs) return null
+  if (data.action === 'planner') {
+    const p = probs.execution?.planner ?? probs.action?.reply
+    return typeof p === 'number' ? p : null
+  }
+  if (data.action === 'consume' && data.conversation === 'muted') {
+    const p = probs.conversation?.muted ?? probs.action?.consume
+    return typeof p === 'number' ? p : null
+  }
+  const direct = probs.action?.[data.action]
+  return typeof direct === 'number' ? direct : null
+}
+
+function TurnDecisionCard({
+  data,
+  messages,
+  open,
+  onOpenChange,
+  onJumpToMessage,
+}: {
+  data: TurnDecisionEvent
+  messages?: Map<string, MonitorMessage>
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onJumpToMessage: (messageId: string) => void
+}) {
+  const actionMeta = TURN_DECISION_ACTIONS[data.action] ?? {
+    label: data.action,
+    badgeClass: 'bg-muted text-muted-foreground',
+  }
+  const confidence = resolveActionConfidence(data)
+  const targetMessage = data.target_message_id ? messages?.get(data.target_message_id) : undefined
+  const orderedGroups = PROBABILITY_DIMENSIONS.filter(
+    (key) => data.probabilities?.[key] && Object.keys(data.probabilities[key]).length > 0
+  )
+  const isReplyLike = data.action === 'reply' || data.action === 'planner'
+
+  return (
+    <TraceRound
+      label={data.provider === 'jev' ? 'Jev' : '回复判定'}
+      time={<EventTimestamp timestamp={data.timestamp} />}
+      summary={
+        <span className="inline-flex flex-wrap items-center gap-1.5">
+          <span
+            className={cn(
+              'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium leading-none',
+              actionMeta.badgeClass
+            )}
+          >
+            <span>{actionMeta.label}</span>
+            {confidence !== null && (
+              <span className="font-mono text-[10px] tabular-nums opacity-80">
+                {Math.round(confidence * 100)}%
+              </span>
+            )}
+          </span>
+          {data.tone && (
+            <span
+              className={cn(
+                'inline-flex items-center rounded px-1.5 py-0.5 font-mono text-[10px] leading-none',
+                TURN_DECISION_TONES[data.tone] ?? 'bg-muted/70 text-muted-foreground',
+                !isReplyLike && 'opacity-55'
+              )}
+            >
+              {data.tone}
+            </span>
+          )}
+          {data.conversation && (
+            <span
+              className={cn(
+                'font-mono text-[10px] leading-none',
+                data.conversation === 'muted'
+                  ? 'rounded bg-rose-500/12 px-1.5 py-0.5 text-rose-600 dark:text-rose-400'
+                  : 'text-muted-foreground/75'
+              )}
+            >
+              {data.conversation}
+            </span>
+          )}
+        </span>
+      }
+      metrics={
+        <span className="font-mono tabular-nums">
+          {data.pending_count > 1 ? `${data.pending_count} 条 · ` : ''}
+          {formatMs(data.duration_ms)}
+        </span>
+      }
+      open={open}
+      onOpenChange={onOpenChange}
+    >
+      <TraceStep>
+        <div className="space-y-2.5 text-xs">
+          {(data.model_name || data.target_message_id) && (
+            <div className="flex flex-wrap items-center gap-2">
+              {data.model_name && (
+                <Badge variant="outline" className="font-mono text-[10px]">
+                  {data.model_name}
+                </Badge>
+              )}
+              {data.target_message_id && (
+                <button
+                  type="button"
+                  className="text-muted-foreground hover:text-foreground inline-flex min-w-0 max-w-full items-center gap-1 truncate text-left transition-colors hover:underline"
+                  title={`跳转到消息 #${data.target_message_id}`}
+                  onClick={() => onJumpToMessage(data.target_message_id)}
+                >
+                  {targetMessage?.speaker_name && (
+                    <span className="text-foreground shrink-0 font-medium">
+                      {targetMessage.speaker_name}
+                    </span>
+                  )}
+                  <span className="shrink-0 font-mono text-[11px]">#{data.target_message_id}</span>
+                  {targetMessage?.content && (
+                    <span className="truncate opacity-80">· {targetMessage.content}</span>
+                  )}
+                </button>
+              )}
+            </div>
+          )}
+
+          {orderedGroups.length > 0 ? (
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {orderedGroups.map((groupKey) => {
+                const entries = Object.entries(data.probabilities[groupKey]).sort(
+                  (a, b) => b[1] - a[1]
+                )
+                const topChoice = entries[0]?.[0]
+                return (
+                  <div
+                    key={groupKey}
+                    className="bg-muted/25 space-y-1.5 rounded-md border border-border/50 px-2.5 py-2"
+                  >
+                    <div className="text-muted-foreground font-mono text-[10px] uppercase tracking-wider">
+                      {groupKey}
+                    </div>
+                    <div className="space-y-1">
+                      {entries.map(([option, prob]) => {
+                        const pct = Math.max(0, Math.min(100, prob * 100))
+                        const isTop = option === topChoice
+                        return (
+                          <div key={option} className="space-y-0.5">
+                            <div className="flex items-center justify-between gap-2 font-mono text-[11px] tabular-nums">
+                              <span
+                                className={cn(
+                                  'truncate',
+                                  isTop ? 'text-foreground font-medium' : 'text-muted-foreground'
+                                )}
+                              >
+                                {option}
+                              </span>
+                              <span
+                                className={cn(
+                                  isTop ? 'text-foreground font-medium' : 'text-muted-foreground'
+                                )}
+                              >
+                                {pct.toFixed(1)}%
+                              </span>
+                            </div>
+                            <div className="bg-muted/70 h-1 overflow-hidden rounded-full">
+                              <div
+                                className={cn(
+                                  'h-full rounded-full transition-[width]',
+                                  isTop ? 'bg-foreground/70' : 'bg-muted-foreground/30'
+                                )}
+                                style={{ width: `${pct}%` }}
+                              />
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          ) : (
+            data.detail && <p className="text-muted-foreground font-mono text-[11px]">{data.detail}</p>
+          )}
+        </div>
+      </TraceStep>
+    </TraceRound>
   )
 }
 
@@ -2325,12 +2539,25 @@ export function TimelineEventRenderer({
       )
     case 'timing_gate.result':
       return <TimingGateCard data={entry.data as TimingGateResultEvent} />
+    case 'turn.decision':
+      return (
+        <TurnDecisionCard
+          data={entry.data as TurnDecisionEvent}
+          messages={messages}
+          open={roundOpen}
+          onOpenChange={onRoundOpenChange}
+          onJumpToMessage={onJumpToMessage}
+        />
+      )
     case 'planner.response':
       return <PlannerResponseCard data={entry.data as PlannerResponseEvent} />
     case 'planner.finalized':
     case 'planner.progress': {
       const data = entry.data as PlannerFinalizedEvent
       const endDetail = data.final_state.end_detail
+      const isDirectDecisionReply =
+        !data.planner && data.tools.some((tool) => tool.tool_call_source === 'turn_decision')
+      const directReplyDurationMs = isDirectDecisionReply ? data.tools[0]?.duration_ms : undefined
       if (isPlannerInterrupted(data)) {
         return <PlannerInterruptedCard data={data} />
       }
@@ -2339,21 +2566,31 @@ export function TimelineEventRenderer({
       }
       return (
         <TraceRound
-          label={`第 ${data.cycle_id} 轮`}
-          time={<EventTimestamp startedAt={data.planner_started_at} endedAt={data.planner_ended_at} />}
+          label={isDirectDecisionReply ? `第 ${data.cycle_id} 轮 · 直出` : `第 ${data.cycle_id} 轮`}
+          time={
+            isDirectDecisionReply ? (
+              <EventTimestamp timestamp={data.timestamp} />
+            ) : (
+              <EventTimestamp startedAt={data.planner_started_at} endedAt={data.planner_ended_at} />
+            )
+          }
           summary={roundOpen
             ? entry.type === 'planner.progress' ? '进行中' : undefined
             : <CollapsedPlannerToolSummary data={data} isProgress={entry.type === 'planner.progress'} />}
-          metrics={data.planner && (
+          metrics={data.planner ? (
             <span title={`Planner 输入 ${data.planner.prompt_tokens} + 输出 ${data.planner.completion_tokens} tokens`}>
               {formatMs(data.planner.duration_ms)} · {data.planner.prompt_tokens + data.planner.completion_tokens} tok
             </span>
-          )}
+          ) : typeof directReplyDurationMs === 'number' && directReplyDurationMs > 0 ? (
+            <span className="font-mono tabular-nums">{formatMs(directReplyDurationMs)}</span>
+          ) : undefined}
           active={entry.type === 'planner.progress'}
           open={roundOpen}
           onOpenChange={onRoundOpenChange}
         >
-          <PlannerFinalizedCard data={data} onOpenReasoning={onOpenReasoning} />
+          {!isDirectDecisionReply && (
+            <PlannerFinalizedCard data={data} onOpenReasoning={onOpenReasoning} />
+          )}
           <PlannerNativeToolCallsBlock data={data} />
           <PlannerToolCallsBlock
             messages={messages}
@@ -2641,6 +2878,7 @@ const MonitorTimeline = memo(function MonitorTimeline({
       if (
         entry.type === 'message.ingested' ||
         entry.type === 'message.sent' ||
+        entry.type === 'turn.decision' ||
         entry.type === 'flow.step' ||
         entry.type === 'llm.retry' ||
         entry.type === 'llm.error' ||
@@ -3095,7 +3333,10 @@ const MonitorTimeline = memo(function MonitorTimeline({
                         <TimelineEventRenderer
                           messages={monitorMessages}
                           entry={entry}
-                          roundOpen={roundExpansion.entries[entry.id] ?? roundExpansion.all}
+                          roundOpen={
+                            roundExpansion.entries[entry.id] ??
+                            (entry.type === 'turn.decision' ? false : roundExpansion.all)
+                          }
                           onRoundOpenChange={open => setRoundExpansion(current => ({ ...current, entries: { ...current.entries, [entry.id]: open } }))}
                           waitUntil={entry.id === latestPlannerEntry?.id ? activeWaitUntil : undefined}
                           onJumpToMessage={handleJumpToMessage}

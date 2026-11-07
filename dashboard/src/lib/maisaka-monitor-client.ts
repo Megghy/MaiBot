@@ -187,6 +187,21 @@ export interface TimingGateResultEvent {
   timestamp: number
 }
 
+export interface TurnDecisionEvent {
+  session_id: string
+  action: 'reply' | 'planner' | 'wait' | 'consume' | string
+  target_message_id: string
+  detail: string
+  pending_count: number
+  duration_ms: number
+  provider: string
+  model_name: string
+  tone: string
+  conversation: string
+  probabilities: Record<string, Record<string, number>>
+  timestamp: number
+}
+
 export interface PlannerRequestEvent {
   session_id: string
   cycle_id: number
@@ -421,32 +436,45 @@ export interface MonitorHistoryPage {
   hasMore: boolean
 }
 
-export type MaisakaMonitorEvent =
-  | { type: 'replay.started'; data: Record<string, never> }
-  | { type: 'sessions.snapshot'; data: SessionsSnapshotEvent }
-  | { type: 'subagent.history'; data: SubagentHistoryEvent }
-  | { type: 'session.start'; data: SessionStartEvent }
-  | { type: 'stage.status'; data: StageStatusEvent }
-  | { type: 'stage.removed'; data: StageRemovedEvent }
-  | { type: 'stage.snapshot'; data: StageSnapshotEvent }
-  | { type: 'flow.step'; data: FlowStepEvent }
-  | { type: 'llm.retry'; data: LlmRetryEvent }
-  | { type: 'llm.error'; data: LlmErrorEvent }
-  | { type: 'message.ingested'; data: MessageIngestedEvent }
-  | { type: 'message.sent'; data: MessageSentEvent }
-  | { type: 'message.updated'; data: MessageUpdatedEvent }
-  | { type: 'timing_gate.result'; data: TimingGateResultEvent }
-  | { type: 'planner.request'; data: PlannerRequestEvent }
-  | { type: 'planner.response'; data: PlannerResponseEvent }
-  | { type: 'planner.finalized'; data: PlannerFinalizedEvent }
-  | { type: 'planner.progress'; data: PlannerFinalizedEvent }
-  | { type: 'tool.execution'; data: ToolExecutionEvent }
-  | { type: 'replier.request'; data: ReplierRequestEvent }
-  | { type: 'replier.response'; data: ReplierResponseEvent }
-  | { type: 'subagent.started'; data: SubagentStartedEvent }
-  | { type: 'subagent.round'; data: SubagentRoundEvent }
-  | { type: 'subagent.tool_result'; data: SubagentToolResultEvent }
-  | { type: 'subagent.finished'; data: SubagentFinishedEvent }
+export interface MaisakaMonitorEventMap {
+  'replay.started': Record<string, never>
+  'sessions.snapshot': SessionsSnapshotEvent
+  'subagent.history': SubagentHistoryEvent
+  'session.start': SessionStartEvent
+  'stage.status': StageStatusEvent
+  'stage.removed': StageRemovedEvent
+  'stage.snapshot': StageSnapshotEvent
+  'flow.step': FlowStepEvent
+  'llm.retry': LlmRetryEvent
+  'llm.error': LlmErrorEvent
+  'message.ingested': MessageIngestedEvent
+  'message.sent': MessageSentEvent
+  'message.updated': MessageUpdatedEvent
+  'timing_gate.result': TimingGateResultEvent
+  'turn.decision': TurnDecisionEvent
+  'planner.request': PlannerRequestEvent
+  'planner.response': PlannerResponseEvent
+  'planner.finalized': PlannerFinalizedEvent
+  'planner.progress': PlannerFinalizedEvent
+  'tool.execution': ToolExecutionEvent
+  'replier.request': ReplierRequestEvent
+  'replier.response': ReplierResponseEvent
+  'subagent.started': SubagentStartedEvent
+  'subagent.round': SubagentRoundEvent
+  'subagent.tool_result': SubagentToolResultEvent
+  'subagent.finished': SubagentFinishedEvent
+}
+
+export type MaisakaMonitorEvent = {
+  [K in keyof MaisakaMonitorEventMap]: { type: K; data: MaisakaMonitorEventMap[K] }
+}[keyof MaisakaMonitorEventMap]
+
+function buildMonitorEvent<K extends keyof MaisakaMonitorEventMap>(
+  type: K,
+  data: MaisakaMonitorEventMap[K]
+): { type: K; data: MaisakaMonitorEventMap[K] } {
+  return { type, data }
+}
 
 export type MaisakaEventListener = (event: MaisakaMonitorEvent) => void
 
@@ -490,8 +518,11 @@ class MaisakaMonitorClient {
       }
       if (!decoded && message.event !== 'planner.reset') return
       const event: MaisakaMonitorEvent = decoded
-        ? { type: decoded.event as MaisakaMonitorEvent['type'], data: decoded.data as never }
-        : { type: 'replay.started', data: {} }
+        ? (buildMonitorEvent(
+            decoded.event as keyof MaisakaMonitorEventMap,
+            decoded.data as never
+          ) as MaisakaMonitorEvent)
+        : buildMonitorEvent('replay.started', {})
 
       this.listeners.forEach((listener) => {
         try {

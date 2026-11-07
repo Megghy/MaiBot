@@ -3254,7 +3254,7 @@ class AMemorixPersonProfileConfig(ConfigBase):
     """证据条数"""
 
     evidence_classification_max_tokens: int = Field(
-        default=1200,
+        default=4096,
         ge=128,
         json_schema_extra={
             "label": {

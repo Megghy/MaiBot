@@ -7,10 +7,12 @@ RouteKey”约定下来，避免 legacy 和 plugin 两条链路各自发明一�
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 from src.common.logger import get_logger
+from src.core.internal_chat import INTERNAL_CHAT_BOT_ID
 
 from .types import RouteKey
 
 logger = get_logger("platform_io.route_key")
+WEBUI_VIRTUAL_GROUP_PREFIX = "webui_virtual_group_"
 
 if TYPE_CHECKING:
     from src.chat.message_receive.message import SessionMessage
@@ -85,6 +87,11 @@ class RouteKeyFactory:
         message_info = message_dict.get("message_info", {})
         additional_config = {}
         if isinstance(message_info, dict):
+            group_info = message_info.get("group_info")
+            if isinstance(group_info, dict):
+                group_id = str(group_info.get("group_id") or "").strip()
+                if group_id.startswith(WEBUI_VIRTUAL_GROUP_PREFIX):
+                    return RouteKey(platform="webui", account_id=INTERNAL_CHAT_BOT_ID)
             raw_additional_config = message_info.get("additional_config", {})
             if isinstance(raw_additional_config, dict):
                 additional_config = raw_additional_config
@@ -119,6 +126,9 @@ class RouteKeyFactory:
         Returns:
             RouteKey: 构造出的规范化路由键。
         """
+        group_info = message.message_info.group_info
+        if group_info is not None and str(group_info.group_id or "").strip().startswith(WEBUI_VIRTUAL_GROUP_PREFIX):
+            return RouteKey(platform="webui", account_id=INTERNAL_CHAT_BOT_ID)
         if message.account_id is not None:
             return RouteKey(platform=message.platform, account_id=message.account_id, scope=message.scope)
         return cls.from_message_dict({

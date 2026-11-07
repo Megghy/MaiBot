@@ -257,6 +257,11 @@ class HookDispatcher:
 
         return dispatch_result
 
+    def count_blocking_subscribers(self, hook_name: str) -> int:
+        """Count live blocking handlers for hooks requiring a single owner."""
+        targets = self._collect_invocation_targets(hook_name, self._resolve_supervisors())
+        return sum(not target.entry.is_observe for target in targets)
+
     def _resolve_supervisors(self) -> Sequence["PluginRunnerSupervisor"]:
         """解析当前调用应使用的 Supervisor 列表。
 

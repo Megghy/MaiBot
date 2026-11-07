@@ -129,6 +129,8 @@ GEMINI_SAFE_SETTINGS: List[SafetySetting] = [
 
 GENERATE_CONFIG_RESERVED_EXTRA_PARAMS = {
     "thinking_budget",
+    "thinking_level",
+    "reasoning_effort",
     "include_thoughts",
     "enable_google_search",
     "transcription_prompt",
@@ -919,10 +921,18 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
         if "safety_settings" not in config_payload:
             config_payload["safety_settings"] = GEMINI_SAFE_SETTINGS
         if "thinking_config" not in config_payload:
-            config_payload["thinking_config"] = ThinkingConfig(
-                include_thoughts=bool(extra_params.get("include_thoughts", True)),
-                thinking_budget=self.clamp_thinking_budget(extra_params, model_identifier),
-            )
+            raw_thinking_level = extra_params.get("thinking_level") or extra_params.get("reasoning_effort")
+            thinking_level = str(raw_thinking_level).strip().upper() if raw_thinking_level else None
+            if thinking_level:
+                config_payload["thinking_config"] = ThinkingConfig(
+                    include_thoughts=bool(extra_params.get("include_thoughts", True)),
+                    thinking_level=thinking_level,
+                )
+            else:
+                config_payload["thinking_config"] = ThinkingConfig(
+                    include_thoughts=bool(extra_params.get("include_thoughts", True)),
+                    thinking_budget=self.clamp_thinking_budget(extra_params, model_identifier),
+                )
 
         tools = _build_tools(tool_options) if tool_options else []
         if enable_google_search:

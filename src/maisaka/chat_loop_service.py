@@ -48,6 +48,7 @@ from src.plugin_runtime.host.hook_spec_registry import HookSpec, HookSpecRegistr
 from src.services.llm_service import LLMServiceClient
 
 from src.maisaka.builtin_tool import get_builtin_tools
+from src.maisaka.turn_trigger.plugin_decision import build_turn_decision_hook_specs
 from src.maisaka.context.history import collect_tool_turn_anchor_indices, normalize_tool_call_result_pairs
 from src.maisaka.context.messages import (
     IMAGE_QUALITY_MAX_SIDE,
@@ -189,6 +190,7 @@ def register_maisaka_hook_specs(registry: HookSpecRegistry) -> List[HookSpec]:
 
     return registry.register_hook_specs(
         [
+            *build_turn_decision_hook_specs(),
             HookSpec(
                 name="maisaka.planner.before_request",
                 description="在 Maisaka 向模型发起规划请求前触发，可改写 Context Items 与工具定义。",

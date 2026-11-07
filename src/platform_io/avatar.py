@@ -66,6 +66,8 @@ class AvatarService:
         force_refresh: bool = False,
     ) -> AvatarResult:
         platform, target_id = validate_avatar_target(platform, target_id, target_type)
+        if target_type == "group" and target_id.startswith("webui_virtual_group_"):
+            return AvatarResult(status="unsupported", expires_at=time.time() + AVATAR_CACHE_TTL)
         account_id = account_id.strip()
         scope = scope.strip()
         # 使用完整路由和目标类型作键，避免多账号、群/用户以及特殊字符互相污染缓存。

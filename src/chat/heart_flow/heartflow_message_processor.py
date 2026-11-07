@@ -58,33 +58,8 @@ class HeartFCMessageReceiver:
                 logger.error(f"出现错误: {e}")
 
             await MessageUtils.store_message_to_db_async(message)  # 存储消息到数据库
-            if chat is not None:
-                await chat.register_message(message)
-            from src.services.memory_flow_service import memory_automation_service
 
-            await memory_automation_service.on_incoming_message(message)
-
-            # 3. 日志记录
-            mes_name = group_info.group_name if group_info else "私聊"
-
-            # TODO: 修复引用格式替换
-            # # 应用用户引用格式替换，将回复<aaa:bbb>和@<aaa:bbb>格式转换为可读格式
-            # processed_plain_text = replace_user_references(
-            #     processed_text, message.message_info.platform, replace_bot_name=True
-            # )
-            # # if not processed_plain_text:
-            # # print(message)
-
-            # INFO 保留单行预览，长链接和多行消息的完整正文留在 DEBUG。
-            message_text = message.processed_plain_text or ""
-            preview = " ".join(message_text.split())
-            if len(preview) > 200:
-                preview = f"{preview[:200]}…（共{len(message_text)}字，已截断）"
-            logger.info(f"[{mes_name}] {userinfo.user_nickname}: {preview}")
-            if preview != message_text:
-                logger.debug(f"[{mes_name}] {userinfo.user_nickname} 完整消息: {message_text}")
-
-            # 如果是群聊，获取群号和群昵称
+            # 如果是群聊，获取群号和群昵称并在触发对话前完成身份建档
             group_id = None
             group_nick_name = None
             if group_info:
@@ -98,6 +73,25 @@ class HeartFCMessageReceiver:
                 group_id=group_id,
                 group_nick_name=group_nick_name,
             )
+
+            if chat is not None:
+                await chat.register_message(message)
+
+            from src.services.memory_flow_service import memory_automation_service
+
+            await memory_automation_service.on_incoming_message(message)
+
+            # 3. 日志记录
+            mes_name = group_info.group_name if group_info else "私聊"
+
+            # INFO 保留单行预览，长链接和多行消息的完整正文留在 DEBUG。
+            message_text = message.processed_plain_text or ""
+            preview = " ".join(message_text.split())
+            if len(preview) > 200:
+                preview = f"{preview[:200]}…（共{len(message_text)}字，已截断）"
+            logger.info(f"[{mes_name}] {userinfo.user_nickname}: {preview}")
+            if preview != message_text:
+                logger.debug(f"[{mes_name}] {userinfo.user_nickname} 完整消息: {message_text}")
 
         except Exception as e:
             logger.error(f"消息处理失败: {e}")

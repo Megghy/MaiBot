@@ -16,12 +16,13 @@ from src.chat.message_receive.chat_manager import chat_manager as core_chat_mana
 from src.chat.message_receive.message import SessionMessage
 from src.chat.utils.utils import is_bot_self
 from src.common.database.database import get_db_session
-from src.common.database.database_model import Messages, PersonInfo
+from src.common.database.database_model import ChatSession, Messages, PersonInfo
 from src.common.logger import get_logger
 from src.common.message_repository import find_messages
 from src.config.config import global_config
 from src.core.internal_chat import INTERNAL_CHAT_BOT_ID, INTERNAL_CHAT_PLATFORM, INTERNAL_CHAT_USER_ID
 from src.core.local_operator import PLUGIN_RELAY_CONFIG_KEY
+from src.services.bot_account_service import get_bot_accounts, get_online_bot_accounts
 from src.services.internal_chat_profile import get_internal_chat_user_name, set_internal_chat_user_name
 
 from .serializers import serialize_message_sequence
@@ -31,6 +32,24 @@ logger = get_logger("webui.chat")
 # 虚拟群聊的默认平台；普通聊天室独立使用 internal，不关联旧 webui 私聊。
 WEBUI_CHAT_PLATFORM = "webui"
 VIRTUAL_GROUP_ID_PREFIX = "webui_virtual_group_"
+
+
+def normalize_virtual_group_id(group_id: Optional[str], fallback_suffix: str) -> str:
+    """规范化 WebUI 虚拟群组 ID，确保统一携带 ``webui_virtual_group_`` 前缀。"""
+    normalized = str(group_id or "").strip()
+    if not normalized:
+        normalized = fallback_suffix
+    if not normalized.startswith(VIRTUAL_GROUP_ID_PREFIX):
+        return f"{VIRTUAL_GROUP_ID_PREFIX}{normalized}"
+    return normalized
+
+
+def resolve_chat_bot_account_id(platform: str) -> str:
+    """解析 WebUI 会话所使用的机器人平台账号 ID。"""
+    if platform in {INTERNAL_CHAT_PLATFORM, WEBUI_CHAT_PLATFORM}:
+        return INTERNAL_CHAT_BOT_ID
+    candidates = get_online_bot_accounts(platform) or get_bot_accounts(platform)
+    return sorted(candidates)[0] if candidates else INTERNAL_CHAT_BOT_ID
 
 AsyncMessageSender = Callable[[Dict[str, Any]], Awaitable[None]]
 
@@ -209,11 +228,24 @@ class ChatHistoryManager:
         target_id = group_id or user_id
         if not target_id:
             return set()
-        return core_chat_manager.resolve_session_ids_by_target(
-            platform=WEBUI_CHAT_PLATFORM if group_id else INTERNAL_CHAT_PLATFORM,
-            target_id=target_id,
-            chat_type="group" if group_id else "private",
-        )
+        if not group_id:
+            return core_chat_manager.resolve_session_ids_by_target(
+                platform=INTERNAL_CHAT_PLATFORM,
+                target_id=target_id,
+                chat_type="private",
+            )
+        normalized_group_id = str(group_id).strip()
+        matched_ids = {
+            session.session_id
+            for session in core_chat_manager.sessions.values()
+            if str(getattr(session, "group_id", "") or "").strip() == normalized_group_id
+        }
+        with get_db_session(auto_commit=False) as db_session:
+            rows = db_session.exec(
+                select(ChatSession.session_id).where(col(ChatSession.group_id) == normalized_group_id)
+            ).all()
+            matched_ids.update(str(sid) for sid in rows if sid)
+        return matched_ids
 
     def get_history(
         self,
@@ -693,7 +725,7 @@ def resolve_initial_virtual_identity(
         if person is None:
             return None
 
-        virtual_group_id = group_id or f"{VIRTUAL_GROUP_ID_PREFIX}{platform}_{person.user_id}"
+        virtual_group_id = normalize_virtual_group_id(group_id, f"{platform}_{person.user_id}")
         virtual_config = build_virtual_identity_config(
             person=person,
             group_id=virtual_group_id,
@@ -1066,9 +1098,7 @@ def create_message_data(
 
     if virtual_config and virtual_config.enabled:
         platform = virtual_config.platform or WEBUI_CHAT_PLATFORM
-        group_id: Optional[str] = (
-            virtual_config.group_id or f"{VIRTUAL_GROUP_ID_PREFIX}{uuid.uuid4().hex[:8]}"
-        )
+        group_id: Optional[str] = normalize_virtual_group_id(virtual_config.group_id, uuid.uuid4().hex[:8])
         group_name: Optional[str] = virtual_config.group_name or "WebUI虚拟群聊"
         actual_user_id = virtual_config.user_id or user_id
         actual_user_nickname = virtual_config.user_nickname or user_name
@@ -1150,7 +1180,7 @@ def create_message_data(
     display_content = build_display_content(content, normalized_images, normalized_emojis, normalized_files, normalized_voices)
 
     return {
-        "account_id": INTERNAL_CHAT_BOT_ID if platform in {INTERNAL_CHAT_PLATFORM, WEBUI_CHAT_PLATFORM} else None,
+        "account_id": resolve_chat_bot_account_id(platform),
         "scope": None,
         "message_info": message_info,
         "message_segment": {
@@ -1268,7 +1298,7 @@ async def handle_chat_message(
         user_id=normalized_user_id,
         user_name=next_user_name,
         message_id=message_id,
-        is_at_bot=True,
+        is_at_bot=not is_virtual_mode_enabled(current_virtual_config),
         virtual_config=current_virtual_config,
         images=images,
         emojis=emojis,
@@ -1418,13 +1448,7 @@ async def enable_virtual_identity(
             await send_chat_error(session_id, f"找不到用户: {person_id_value}")
             return None
 
-        custom_group_id = str(virtual_data.get("group_id") or "").strip()
-        if custom_group_id:
-            current_group_id = custom_group_id
-            if not current_group_id.startswith(VIRTUAL_GROUP_ID_PREFIX):
-                current_group_id = f"{VIRTUAL_GROUP_ID_PREFIX}{current_group_id}"
-        else:
-            current_group_id = f"{VIRTUAL_GROUP_ID_PREFIX}{session_prefix}"
+        current_group_id = normalize_virtual_group_id(virtual_data.get("group_id"), session_prefix)
 
         current_virtual_config = build_virtual_identity_config(
             person=person,

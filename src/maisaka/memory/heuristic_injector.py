@@ -373,8 +373,7 @@ class HeuristicMemoryInjector:
             return ""
         lines = [
             HEURISTIC_MEMORY_REFERENCE_MARKER,
-            "Internal long-term memory recalled from the current chat impression. Use it only as reasoning context; do not quote it verbatim to the user.",
-            "",
+            "【关联长期记忆-内部参考（仅作背景记忆，请勿原样复述）】",
         ]
         for index, hit in enumerate(hits, start=1):
             content = str(hit.content or "").strip().replace("\r", " ").replace("\n", " ")

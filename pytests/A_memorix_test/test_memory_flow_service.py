@@ -725,6 +725,7 @@ async def test_memory_automation_service_on_incoming_message_auto_starts_only(mo
     assert events == [
         ("start", "fact"),
         ("start", "summary"),
+        ("summary", "session-1"),
         ("shutdown", "summary"),
         ("shutdown", "fact"),
     ]

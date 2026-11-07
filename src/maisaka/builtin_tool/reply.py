@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from src.maisaka.reply_supplement import ReplySupplement
 
 logger = get_logger("maisaka_builtin_reply")
-_REPLY_TOOL_INTERNAL_ARGUMENTS = {"msg_id", "_reply_id", "_plugin_reply_prompt"}
+_REPLY_TOOL_INTERNAL_ARGUMENTS = {"msg_id", "_reply_id", "_plugin_reply_prompt", "_context_message_ids"}
 _DUPLICATE_TARGET_REPLY_REMINDER_ARG = "_duplicate_target_reply_reminder"
 _DUPLICATE_TARGET_REPLY_REMINDER_TEMPLATE = (
     "你刚刚已经回复过这条消息，你刚刚的发言是：“{previous_reply}”\n"
@@ -490,9 +490,21 @@ async def execute_reply(
             metadata={"reply_id": extension_execution.reply_id},
         )
 
+    raw_context_ids = invocation_arguments.get("_context_message_ids")
+    allowed_message_ids = (
+        {str(item) for item in raw_context_ids if str(item).strip()}
+        if isinstance(raw_context_ids, (list, tuple, set)) and raw_context_ids
+        else None
+    )
     replyer_chat_history = list(tool_ctx.runtime._chat_history)
     if config_module.global_config.debug.replyer_retro_prompt:
-        replyer_chat_history = await tool_ctx.runtime.build_retro_reply_history()
+        replyer_chat_history = await tool_ctx.runtime.build_retro_reply_history(
+            allowed_message_ids=allowed_message_ids,
+        )
+    elif allowed_message_ids is not None:
+        replyer_chat_history = [
+            msg for msg in replyer_chat_history if getattr(msg, "message_id", None) in allowed_message_ids
+        ]
     # 并行编排的引用目标尚未确定，不能把请求快照的最后一条消息强制指定为正文回复对象。
     previous_target_reply = (
         _find_recent_reply_to_target(replyer_chat_history, target_message_id) if supplement_runner is None else ""

@@ -91,7 +91,7 @@ from src.maisaka.monitor.events import (
 )
 from src.maisaka.memory.person_profile import build_person_profile_injection_messages
 from src.maisaka.context.planner_messages import build_planner_user_prefix_from_session_message
-from src.maisaka.visual.mode_utils import resolve_enable_visual_planner
+from src.maisaka.visual.mode_utils import resolve_enable_visual_planner, resolve_enable_visual_replyer
 
 if TYPE_CHECKING:
     from .runtime import MaisakaHeartFlowChatting
@@ -135,6 +135,7 @@ class CycleRuntimeState:
     action_tool_count: int = 0
     response: Optional[ChatResponse] = None
     reply_target_message: Optional[SessionMessage] = None
+    direct_reply_sent: bool = False
     planner_extra_lines: list[str] = field(default_factory=list)
     planner_interrupted: bool = False
     cycle_end: CycleEnd = field(default_factory=lambda: CycleEnd("continue", "本轮思考完成，继续后续内部轮次。"))
@@ -430,7 +431,7 @@ class MaisakaReasoningEngine:
             return False
 
         if self.passive_replyer_enabled and planner_content:
-            await self._reply_from_planner_content(planner_content, cycle_detail, state)
+            await self._reply_without_tool_call(planner_content, cycle_detail, state, use_supplement=True)
             self._end_planner_no_tool_cycle(
                 planner_extra_lines,
                 status_line=f"状态：{state.cycle_end.detail}",
@@ -449,22 +450,32 @@ class MaisakaReasoningEngine:
         state.tool_monitor_results = []
         return True
 
-    async def _reply_from_planner_content(
+    async def _reply_without_tool_call(
         self,
         content: str,
         cycle_detail: CycleDetail,
         state: CycleRuntimeState,
+        *,
+        use_supplement: bool,
+        extra_info: str = "",
+        context_message_ids: Optional[List[str]] = None,
     ) -> None:
-        """把最终正文作为指导执行一次回复，不追加虚构的工具调用或工具结果。"""
+        """Execute the native reply flow without fabricating a model tool call."""
 
         started_at = time.time()
         execution_id = uuid.uuid4().hex
         target = state.reply_target_message
-        arguments = {
+        arguments: dict[str, Any] = {
             "msg_id": target.message_id if target is not None else "",
             "reply_reference": content,
+            "reply_style": "简短表达",
         }
-        self._runtime._update_stage_status("Replyer", "根据 Planner 正文生成可见回复")
+        if extra_info.strip():
+            arguments["_extra_info_block"] = extra_info.strip()
+        if context_message_ids:
+            arguments["_context_message_ids"] = list(context_message_ids)
+        source_label = "Planner 正文触发" if use_supplement else "插件回复判定"
+        self._runtime._update_stage_status("Replyer", source_label)
         tool_ctx = BuiltinToolRuntimeContext(self, self._runtime)
         if target is None:
             result = tool_ctx.build_failure_result("reply", "Planner 请求快照中没有可回复的真实消息。")
@@ -481,7 +492,7 @@ class MaisakaReasoningEngine:
 
                 result = await execute_reply(
                     tool_ctx, arguments, call_id=execution_id, target_message=target,
-                    supplement_runner=supplement_runner,
+                    supplement_runner=supplement_runner if use_supplement else None,
                 )
             except Exception as exc:
                 # 直接执行不再经过 ToolRegistry 的异常边界；记录完整异常并结束，不能重新发送。
@@ -490,7 +501,10 @@ class MaisakaReasoningEngine:
         ended_at = time.time()
         cycle_detail.time_records["replyer"] = ended_at - started_at
         summary = result.get_history_content()
-        if not result.success and any(receipt["success"] for receipt in result.metadata.get("send_results", [])):
+        state.direct_reply_sent = result.success or any(
+            receipt["success"] for receipt in result.metadata.get("send_results", [])
+        )
+        if not result.success and state.direct_reply_sent:
             summary = f"部分消息已发送，本轮不再重试。{summary}"
         # 沿用现有回复详情展示与持久化字段，但标明它由正文触发，不进入模型的工具协议。
         state.tool_result_summaries = [summary]
@@ -499,8 +513,8 @@ class MaisakaReasoningEngine:
                 "tool_call_id": execution_id,
                 "tool_name": "reply",
                 "tool_args": arguments,
-                "tool_call_source": "planner_text",
-                "tool_call_source_label": "Planner 正文触发",
+                "tool_call_source": "planner_text" if use_supplement else "turn_decision",
+                "tool_call_source_label": source_label,
                 "success": result.success,
                 "summary": summary,
                 "started_at": started_at,
@@ -937,6 +951,15 @@ class MaisakaReasoningEngine:
         try:
             while self._runtime._running:
                 queued_trigger = await self._runtime._internal_turn_queue.get()
+                if queued_trigger == "decision":
+                    try:
+                        handled = await self._runtime._message_turn_scheduler._plugin_decision.run()
+                    except BaseException:
+                        self._runtime._mark_message_turn_unscheduled()
+                        raise
+                    if handled:
+                        continue
+                    queued_trigger = "message"
                 turn_start_context = await self._prepare_turn_start_context(queued_trigger)
                 if turn_start_context.trigger_message is None:
                     continue
@@ -1106,7 +1129,7 @@ class MaisakaReasoningEngine:
             except asyncio.QueueEmpty:
                 break
 
-            if next_trigger == "message":
+            if next_trigger in {"message", "decision"}:
                 message_triggered = True
                 continue
             if next_trigger == "timeout":
@@ -1187,7 +1210,7 @@ class MaisakaReasoningEngine:
         planner_prefix: str,
     ) -> MessageSequence:
         message_sequence = build_prefixed_message_sequence(message.raw_message, planner_prefix)
-        if resolve_enable_visual_planner():
+        if resolve_enable_visual_planner() or resolve_enable_visual_replyer():
             await self._hydrate_visual_components(message_sequence.components)
         return message_sequence
 

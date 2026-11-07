@@ -77,6 +77,8 @@ RETRO_REPLY_TARGET_CONTENT_LIMIT = 300
 RETRO_RECENT_IMAGE_COUNT = 3
 RETRO_RECENT_IMAGE_MAX_SIDE = 640
 RETRO_OLDER_IMAGE_MAX_SIDE = 128
+RETRO_VISUAL_MESSAGE_WINDOW = 4
+RETRO_VISUAL_MAX_AGE_SECONDS = 300.0
 
 
 def _resize_retro_image(part: ContextImagePart, max_side: int) -> ContextImagePart:
@@ -164,6 +166,7 @@ class RetroReplyPromptMixin:
             reply_reference=str((reply_tool_args or {}).get("reply_reference") or ""),
             expression_habits=expression_habits,
             reply_requirements=reply_requirements,
+            extra_info_block=str((reply_tool_args or {}).get("_extra_info_block") or ""),
         )
         user_builder = ContextItemBuilder().set_role(RoleType.User)
         if enable_visual_message:
@@ -205,12 +208,39 @@ class RetroReplyPromptMixin:
     def _prepare_retro_visual_history(
         chat_history: List[LLMContextMessage],
     ) -> Tuple[List[LLMContextMessage], Dict[int, List[ContextImagePart]]]:
-        """确定实际发送的图片并按新旧缩小，仅在本次模板副本中去掉对应的图片和表情包描述。"""
+        """确定实际发送的图片并按新旧缩小，仅对近期活跃窗口或被引用消息注入原图，旧图保留文本描述。"""
+
+        content_indices = [
+            idx for idx, msg in enumerate(chat_history) if isinstance(msg, ContentContextMessage)
+        ]
+        if not content_indices:
+            return chat_history, {}
+
+        latest_timestamp = chat_history[content_indices[-1]].timestamp
+        window_indices = set(content_indices[-RETRO_VISUAL_MESSAGE_WINDOW:])
+        eligible_indices: Set[int] = set()
+        quoted_message_ids: Set[str] = set()
+        for idx in window_indices:
+            msg = chat_history[idx]
+            assert isinstance(msg, ContentContextMessage)
+            if (latest_timestamp - msg.timestamp).total_seconds() <= RETRO_VISUAL_MAX_AGE_SECONDS:
+                eligible_indices.add(idx)
+                for component in msg.raw_message.components:
+                    if isinstance(component, ReplyComponent) and component.target_message_id:
+                        quoted_message_ids.add(component.target_message_id)
+
+        if quoted_message_ids:
+            for idx in content_indices:
+                msg = chat_history[idx]
+                if isinstance(msg, ContentContextMessage) and msg.message_id in quoted_message_ids:
+                    eligible_indices.add(idx)
 
         candidates: List[Tuple[int, int, ContextImagePart, bool]] = []
-        for message_index, message in enumerate(chat_history):
-            if not isinstance(message, ContentContextMessage):
+        for message_index in content_indices:
+            if message_index not in eligible_indices:
                 continue
+            message = chat_history[message_index]
+            assert isinstance(message, ContentContextMessage)
             media_index = -1
             for component in message.raw_message.components:
                 if not isinstance(component, (ImageComponent, EmojiComponent)):
@@ -329,12 +359,18 @@ class RetroReplyPromptMixin:
         reply_reference: str,
         expression_habits: str,
         reply_requirements: str,
+        extra_info_block: str = "",
     ) -> Dict[str, str]:
         """按旧版的块顺序准备模板占位符内容。"""
 
         combined_reference = self._build_reply_reference_message(reply_reason, reply_reference)
         # 旧版按概率用备选表达风格整体替换人设里的表达风格，而不是追加一条风格消息
         reply_style = self._select_temporary_reply_style() or self._select_reply_style()
+        merged_extra = "\n\n".join(
+            part.strip()
+            for part in (reply_requirements, extra_info_block)
+            if part and part.strip()
+        )
         return {
             "bot_name": global_config.bot.nickname,
             "sender_name": self._build_retro_sender_name(chat_history, reply_message),
@@ -342,7 +378,7 @@ class RetroReplyPromptMixin:
             # 复古回复器对齐训练分布：表达习惯参考块在训练数据中仅 bdpan 源少量出现，
             # 线上动态注入会把回复带向套用句式模板、变书面。retro 路径跳过该块。
             "expression_habits_block": "",
-            "extra_info_block": self._build_retro_extra_info_block(reply_requirements),
+            "extra_info_block": self._build_retro_extra_info_block(merged_extra),
             "dialogue_prompt": self._build_retro_dialogue_block(chat_history),
             "time_block": f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             "reply_target_block": self._build_retro_reply_target_block(reply_message, chat_history),

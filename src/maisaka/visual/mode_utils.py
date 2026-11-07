@@ -31,3 +31,14 @@ def resolve_enable_visual_planner() -> bool:
         return False
 
     return bool(task_models) and not non_visual_models
+
+
+def resolve_enable_visual_replyer() -> bool:
+    """判断 replyer 任务是否包含支持视觉输入的模型。"""
+
+    model_config = config_manager.get_model_config()
+    task_config = model_config.model_task_config.replyer
+    models_by_name = {model.name: model for model in model_config.models}
+    task_models = _normalize_model_names(list(task_config.model_list))
+    return any(model_name in models_by_name and models_by_name[model_name].visual for model_name in task_models)
+

@@ -156,7 +156,7 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         # Keep all original messages for batching and later learning.
         self.message_cache: list[SessionMessage] = []
         self._last_processed_index = 0
-        self._internal_turn_queue: asyncio.Queue[Literal["message", "timeout", "proactive"]] = asyncio.Queue()
+        self._internal_turn_queue: asyncio.Queue[Literal["message", "timeout", "proactive", "decision"]] = asyncio.Queue()
         self._proactive_trigger_message: Optional[SessionMessage] = None
         self._proactive_logical_turn_id: Optional[str] = None
         self._subagent_tasks = SubAgentTaskManager()
@@ -290,10 +290,15 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         self._update_stage_status("空闲", "等待消息触发")
         logger.info(f"{self.log_prefix} Maisaka 运行时已启动")
 
-    async def build_retro_reply_history(self) -> List[LLMContextMessage]:
+    async def build_retro_reply_history(
+        self,
+        *,
+        allowed_message_ids: Optional[set[str]] = None,
+    ) -> List[LLMContextMessage]:
         """独立读取复古回复窗口，避免 Planner 裁切缩短回复器的聊天记录。"""
 
-        context_limit = max(1, int(self._max_context_size * 0.6))
+        base_limit = max(1, int(self._max_context_size * 0.6))
+        context_limit = max(base_limit, 40) if allowed_message_ids is not None else base_limit
         recent_messages = await asyncio.to_thread(
             find_messages,
             session_id=self.session_id,
@@ -301,6 +306,10 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
             limit_mode="latest",
         )
         recent_messages = select_messages_after_latest_clear_marker(recent_messages)
+        if allowed_message_ids is not None:
+            recent_messages = [
+                message for message in recent_messages if message.message_id in allowed_message_ids
+            ]
         history: List[LLMContextMessage] = []
         for message in recent_messages:
             if message.is_notify:
@@ -1160,11 +1169,11 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         self._deferred_message_turn_task.cancel()
         self._deferred_message_turn_task = None
 
-    def _enqueue_message_turn(self) -> None:
+    def _enqueue_message_turn(self, trigger: Literal["message", "decision"] = "message") -> None:
         """投递一次消息触发的内部循环。"""
         self._cancel_deferred_message_turn_task()
         self._message_turn_scheduled = True
-        self._internal_turn_queue.put_nowait("message")
+        self._internal_turn_queue.put_nowait(trigger)
 
     def _defer_message_turn_check(self, delay_seconds: float) -> None:
         """延迟后重新检查是否应投递消息触发。"""

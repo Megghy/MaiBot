@@ -8,7 +8,13 @@ import base64
 from PIL import Image
 import pytest
 
-from src.common.data_models.message_component_data_model import EmojiComponent, ImageComponent, MessageSequence, TextComponent
+from src.common.data_models.message_component_data_model import (
+    EmojiComponent,
+    ImageComponent,
+    MessageSequence,
+    ReplyComponent,
+    TextComponent,
+)
 from src.llm_models.payload_content.context_item import ContextItemBuilder, ContextItemMeta, ContextImagePart
 from src.maisaka.context import messages as context
 from src.maisaka.visual.deferred_images import (
@@ -247,3 +253,53 @@ def test_deferred_image_variants_keep_source_and_skip_discarded_work(limit):
         with Image.open(BytesIO(base64.b64decode(part.image_base64, validate=True))) as image:
             sizes.append(image.size)
     assert sizes == ([(8, 8), (4, 4), (2, 2)] if limit else [])
+
+
+def test_retro_visual_history_skips_stale_images_unless_quoted(monkeypatch):
+    from src.chat.replyer.maisaka_generator_base import BaseMaisakaReplyGenerator
+    from src.config.config import global_config
+
+    monkeypatch.setattr(global_config.visual, "max_image_num", 5)
+    monkeypatch.setattr(global_config.visual, "image_quality", "normal")
+    data = image_bytes()
+    stale_unquoted = context.ContentContextMessage(
+        raw_message=MessageSequence([ImageComponent(binary_hash="old-1", binary_data=data, content="[图片：旧图]")]),
+        visible_text="[图片：旧图]",
+        timestamp=datetime(2026, 1, 1, 16, 0, 0),
+        message_id="msg-old-1",
+    )
+    stale_quoted = context.ContentContextMessage(
+        raw_message=MessageSequence([ImageComponent(binary_hash="old-2", binary_data=data, content="[图片：被引用旧图]")]),
+        visible_text="[图片：被引用旧图]",
+        timestamp=datetime(2026, 1, 1, 16, 10, 0),
+        message_id="msg-old-2",
+    )
+    recent_img = context.ContentContextMessage(
+        raw_message=MessageSequence([ImageComponent(binary_hash="new-1", binary_data=data, content="[图片：新图]")]),
+        visible_text="[图片：新图]",
+        timestamp=datetime(2026, 1, 1, 18, 8, 0),
+        message_id="msg-new-1",
+    )
+    plain_latest = context.ContentContextMessage(
+        raw_message=MessageSequence([TextComponent("@喵 @糖心蛋")]),
+        visible_text="@喵 @糖心蛋",
+        timestamp=datetime(2026, 1, 1, 18, 8, 40),
+        message_id="msg-latest",
+    )
+    rendered, visual_parts = BaseMaisakaReplyGenerator._prepare_retro_visual_history(
+        [stale_unquoted, stale_quoted, recent_img, plain_latest]
+    )
+    assert set(visual_parts.keys()) == {2}
+    assert rendered[0].visible_text == "[图片：旧图]"
+    assert rendered[1].visible_text == "[图片：被引用旧图]"
+
+    quote_latest = context.ContentContextMessage(
+        raw_message=MessageSequence([ReplyComponent("msg-old-2"), TextComponent("这张图笑死")]),
+        visible_text="这张图笑死",
+        timestamp=datetime(2026, 1, 1, 18, 8, 50),
+        message_id="msg-quote",
+    )
+    _, quoted_visual_parts = BaseMaisakaReplyGenerator._prepare_retro_visual_history(
+        [stale_unquoted, stale_quoted, quote_latest]
+    )
+    assert set(quoted_visual_parts.keys()) == {1}

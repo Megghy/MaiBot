@@ -809,3 +809,35 @@ async def emit_subagent_finished(
         "duration_ms": float(duration_ms),
         "timestamp": time.time(),
     })
+
+
+async def emit_turn_decision(
+    *,
+    session_id: str,
+    action: str,
+    target_message_id: str = "",
+    detail: str = "",
+    pending_count: int = 0,
+    duration_ms: float = 0.0,
+    provider: str = "",
+    model_name: str = "",
+    tone: str = "",
+    conversation: str = "",
+    probabilities: Optional[Dict[str, Any]] = None,
+) -> None:
+    """广播插件轮次判定结果，供时间线展示与历史回放。"""
+
+    await _broadcast("turn.decision", {
+        "session_id": session_id,
+        "action": action,
+        "target_message_id": target_message_id,
+        "detail": detail,
+        "pending_count": int(pending_count),
+        "duration_ms": float(duration_ms),
+        "provider": provider,
+        "model_name": model_name,
+        "tone": tone,
+        "conversation": conversation,
+        "probabilities": _normalize_payload_value(probabilities or {}),
+        "timestamp": time.time(),
+    })

@@ -6,6 +6,7 @@ from src.common.logger import get_logger
 from src.config.config import global_config
 
 from .gates import DynamicReplyTurnGate, TurnGateResult
+from .plugin_decision import PluginTurnDecision, has_turn_decision_owner
 
 if TYPE_CHECKING:
     from src.maisaka.runtime import MaisakaHeartFlowChatting
@@ -23,6 +24,7 @@ class MessageTurnScheduler:
     def __init__(self, runtime: "MaisakaHeartFlowChatting") -> None:
         self._runtime = runtime
         self._dynamic_reply_gate = DynamicReplyTurnGate(runtime)
+        self._plugin_decision = PluginTurnDecision(self)
 
     def record_reply(self) -> None:
         """记录 Planner 实际调用了一次 reply，供动态门控统计回复次数。"""
@@ -45,6 +47,11 @@ class MessageTurnScheduler:
 
         pending_count = runtime._get_pending_message_count()
         if pending_count <= 0:
+            return
+
+        if has_turn_decision_owner(runtime) and runtime._get_message_quiet_period_remaining_seconds() <= 0:
+            if not self._plugin_decision.is_waiting_for_new_message():
+                runtime._enqueue_message_turn("decision")
             return
 
         result = self._evaluate(pending_count)

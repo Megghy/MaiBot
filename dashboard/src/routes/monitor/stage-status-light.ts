@@ -8,7 +8,9 @@ export function getStageStatusLight(status?: StageStatusInfo): LightStatus {
   if (status.stage === '空闲' || status.stage === '等待消息' || status.agentState === 'idle') {
     return 'on'
   }
-  // wait 是工具暂停后继续工作的倒计时，与等待新消息的空闲不同。
-  if (status.agentState === 'running' || status.agentState === 'wait') return 'mixed'
+  // wait 是工具暂停后继续工作的倒计时，与等待新消息的空闲不同；回复判定为插件评估中。
+  if (status.agentState === 'running' || status.agentState === 'wait' || status.stage === '回复判定') {
+    return 'mixed'
+  }
   return 'off'
 }
