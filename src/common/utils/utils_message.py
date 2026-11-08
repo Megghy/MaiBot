@@ -243,7 +243,7 @@ class MessageUtils:
                 db_message = session.exec(statement).first()
                 if db_message is None:
                     return
-                db_message.raw_content = MessageUtils.to_db_record_msg(message.raw_message)
+                db_message.raw_content = MessageUtils.from_MaiSeq_to_db_record_msg(message.raw_message)
                 db_message.processed_plain_text = message.processed_plain_text
                 session.add(db_message)
 
