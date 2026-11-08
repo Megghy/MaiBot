@@ -259,7 +259,7 @@ def test_encode_jev_image_asset_enforces_typesafe_dimension_bounds():
     import io
     from PIL import Image
 
-    for raw_size in [(400, 120), (100, 100), (2000, 1000)]:
+    for raw_size in [(400, 120), (100, 100), (2000, 1000), (640, 10357)]:
         img = Image.new("RGBA", raw_size, (255, 0, 0, 128))
         buf = io.BytesIO()
         img.save(buf, format="PNG")
@@ -270,3 +270,7 @@ def test_encode_jev_image_asset_enforces_typesafe_dimension_bounds():
         w, h = decoded.size
         assert 280 <= w <= 1568
         assert 280 <= h <= 1568
+
+    assert decisions._format_jev_image_tag("img_1", "[图片，识别中.....]") == "[图片: img_1]"
+    assert decisions._format_jev_image_tag("img_1", "[图片：金黄厚切炸猪排]") == "[图片: img_1 | 金黄厚切炸猪排]"
+    assert decisions._format_jev_image_tag(None, "[图片：金黄厚切炸猪排]") == "[图片: 金黄厚切炸猪排]"

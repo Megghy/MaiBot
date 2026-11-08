@@ -112,8 +112,9 @@ JEV_MAX_IMAGES = 6
 JEV_RECENT_IMAGE_MESSAGE_WINDOW = 15
 JEV_RECENT_IMAGE_MAX_AGE_SECONDS = 1800.0
 JEV_IMAGE_MIN_SIDE = 280
-JEV_IMAGE_MAX_SIDE = 800
+JEV_IMAGE_MAX_SIDE = 1024
 JEV_IMAGE_HARD_MAX_SIDE = 1568
+JEV_LONG_IMAGE_ASPECT_RATIO = 2.5
 _JEV_IMAGE_CACHE_LIMIT = 32
 _JEV_IMAGE_ASSET_CACHE: OrderedDict[str, dict[str, str]] = OrderedDict()
 
@@ -133,6 +134,17 @@ def _encode_jev_image_asset(image_bytes: bytes) -> dict[str, str] | None:
                 img = img.convert("RGB")
 
             w, h = img.size
+            if w > 0 and h > int(w * JEV_LONG_IMAGE_ASPECT_RATIO):
+                target_h = max(JEV_IMAGE_MIN_SIDE, int(round(w * JEV_LONG_IMAGE_ASPECT_RATIO)))
+                half_h = target_h // 2
+                top_part = img.crop((0, 0, w, half_h))
+                bottom_part = img.crop((0, h - (target_h - half_h), w, h))
+                stitched = Image.new("RGB", (w, target_h), (255, 255, 255))
+                stitched.paste(top_part, (0, 0))
+                stitched.paste(bottom_part, (0, half_h))
+                img = stitched
+                w, h = img.size
+
             if max(w, h) > JEV_IMAGE_MAX_SIDE:
                 scale = JEV_IMAGE_MAX_SIDE / float(max(w, h))
                 w = max(1, int(round(w * scale)))
@@ -202,6 +214,29 @@ def _get_or_encode_jev_image_asset(component: ImageComponent) -> dict[str, str] 
     return asset
 
 
+def _extract_clean_image_summary(raw_content: str) -> str:
+    text = (raw_content or "").replace(IMAGE_PROCESSING_PLACEHOLDER, "").strip()
+    if not text or text == "[图片]":
+        return ""
+    if text.startswith("[图片：") and text.endswith("]"):
+        text = text[4:-1].strip()
+    elif text.startswith("[图片:") and text.endswith("]"):
+        text = text[4:-1].strip()
+    text = " ".join(text.split())
+    return text[:120]
+
+
+def _format_jev_image_tag(asset_key: str | None, raw_content: str) -> str:
+    summary = _extract_clean_image_summary(raw_content)
+    if asset_key and summary:
+        return f"[图片: {asset_key} | {summary}]"
+    if asset_key:
+        return f"[图片: {asset_key}]"
+    if summary:
+        return f"[图片: {summary}]"
+    return "[图片]"
+
+
 def _render_jev_message_text(
     message: SessionMessage,
     msg_comp_to_asset: dict[tuple[str, int], str],
@@ -218,10 +253,8 @@ def _render_jev_message_text(
             )
             parts.append(f"@{target_name} ")
         elif isinstance(component, ImageComponent):
-            if asset_key := msg_comp_to_asset.get((message.message_id, idx)):
-                parts.append(f"[图片: {asset_key}]")
-            else:
-                parts.append("[图片]")
+            asset_key = msg_comp_to_asset.get((message.message_id, idx))
+            parts.append(_format_jev_image_tag(asset_key, component.content))
         elif isinstance(component, EmojiComponent):
             content = component.content.strip()
             parts.append(content if content else "[表情包]")
@@ -309,10 +342,7 @@ def build_turn_request(runtime: MaisakaHeartFlowChatting, messages: list[Session
     ]
     for item in recent_items:
         if _refresh_pending_visual_components(item.original_message.raw_message.components):
-            item.visible_text = build_session_message_visible_text(
-                item.original_message,
-                raw_message=item.original_message.raw_message,
-            )
+            item.visible_text = build_session_message_visible_text(item.original_message)
     for message in messages:
         _refresh_pending_visual_components(message.raw_message.components)
 
@@ -329,10 +359,9 @@ def build_turn_request(runtime: MaisakaHeartFlowChatting, messages: list[Session
             for idx, comp_dict in enumerate(raw_components):
                 if not isinstance(comp_dict, dict) or comp_dict.get("type") != "image":
                     continue
-                if asset_key := msg_comp_to_asset.get((message.message_id, idx)):
-                    comp_dict["content"] = f"[图片: {asset_key}]"
-                else:
-                    comp_dict["content"] = "[图片]"
+                asset_key = msg_comp_to_asset.get((message.message_id, idx))
+                raw_comp_content = str(comp_dict.get("content") or "")
+                comp_dict["content"] = _format_jev_image_tag(asset_key, raw_comp_content)
         pending_payloads.append(msg_dict)
 
     return {
