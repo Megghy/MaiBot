@@ -76,7 +76,9 @@ from src.maisaka.context.post_processor import process_chat_history_after_cycle
 from src.maisaka.context.history import (
     build_prefixed_message_sequence,
     build_session_message_visible_text,
+    build_visible_text_from_sequence,
 )
+from src.maisaka.visual.chat_history_refresher import _refresh_pending_visual_components
 from src.maisaka.jargon_context_matcher import (
     build_jargon_reference_message,
     extract_jargon_reference_contents,
@@ -1177,6 +1179,10 @@ class MaisakaReasoningEngine:
         """根据真实消息构造对应的上下文消息。"""
 
         source_sequence = message.raw_message
+        if await asyncio.to_thread(_refresh_pending_visual_components, source_sequence.components):
+            refreshed_plain_text = build_visible_text_from_sequence(source_sequence).strip()
+            if refreshed_plain_text:
+                message.processed_plain_text = refreshed_plain_text
         visible_text = self._build_legacy_visible_text(message, source_sequence, source_kind=source_kind)
         include_chat_id = self._runtime._is_focus_mode_active_for_current_chat()
         planner_prefix = build_planner_user_prefix_from_session_message(

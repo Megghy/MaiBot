@@ -307,8 +307,13 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         )
         recent_messages = select_messages_after_latest_clear_marker(recent_messages)
         if allowed_message_ids is not None:
+            effective_ids = set(allowed_message_ids)
+            for message in recent_messages:
+                reply_to = getattr(message, "reply_to", "")
+                if message.message_id in effective_ids and reply_to:
+                    effective_ids.add(str(reply_to))
             recent_messages = [
-                message for message in recent_messages if message.message_id in allowed_message_ids
+                message for message in recent_messages if message.message_id in effective_ids
             ]
         history: List[LLMContextMessage] = []
         for message in recent_messages:
@@ -320,6 +325,12 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
             )
             if history_message is not None:
                 history.append(history_message)
+        refresher = getattr(self._reasoning_engine, "_refresh_chat_history_visual_placeholders", None)
+        if history and refresher is not None:
+            await refresher(
+                chat_history=history,
+                wait_for_text_model=False,
+            )
         return history
 
     async def _restore_recent_context_from_db(self) -> None:
@@ -964,10 +975,22 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         """图片识别完成后，原地刷新监控面板中的消息内容。"""
 
         try:
+            from src.common.utils.utils_message import MessageUtils
+            from src.maisaka.context.history import build_visible_text_from_sequence
             from src.maisaka.visual.chat_history_refresher import _refresh_pending_visual_components
 
             if not _refresh_pending_visual_components(message.raw_message.components):
                 return
+
+            refreshed_plain_text = build_visible_text_from_sequence(message.raw_message).strip()
+            if refreshed_plain_text:
+                message.processed_plain_text = refreshed_plain_text
+            await asyncio.to_thread(MessageUtils.update_message_visual_content_in_db, message)
+            if self._chat_history:
+                await self._reasoning_engine._refresh_chat_history_visual_placeholders(
+                    chat_history=self._chat_history,
+                    wait_for_text_model=False,
+                )
 
             user_info = message.message_info.user_info
             group_info = message.message_info.group_info

@@ -252,3 +252,21 @@ async def test_build_retro_reply_history_filters_by_allowed_message_ids_before_h
     result = await chatting.build_retro_reply_history(allowed_message_ids={"m-1", "m-3"})
     assert [item.message_id for item in result] == ["m-1", "m-3"]
     assert hydrated_ids == ["m-1", "m-3"]
+
+
+def test_encode_jev_image_asset_enforces_typesafe_dimension_bounds():
+    import base64
+    import io
+    from PIL import Image
+
+    for raw_size in [(400, 120), (100, 100), (2000, 1000)]:
+        img = Image.new("RGBA", raw_size, (255, 0, 0, 128))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        asset = decisions._encode_jev_image_asset(buf.getvalue())
+        assert asset is not None
+        assert asset["format"] == "jpeg"
+        decoded = Image.open(io.BytesIO(base64.b64decode(asset["data_base64"])))
+        w, h = decoded.size
+        assert 280 <= w <= 1568
+        assert 280 <= h <= 1568

@@ -232,6 +232,22 @@ class MessageUtils:
         await asyncio.to_thread(MessageUtils.store_message_to_db, message)
 
     @staticmethod
+    def update_message_visual_content_in_db(message: "SessionMessage") -> None:
+        """后台识图完成后，同步更新数据库中该消息的 raw_content 与 processed_plain_text。"""
+        from src.common.database.database import get_db_session
+        from src.common.database.database_model import Messages
+
+        with _DB_WRITE_THREAD_LOCK:
+            with get_db_session() as session:
+                statement = select(Messages).filter_by(message_id=message.message_id).limit(1)
+                db_message = session.exec(statement).first()
+                if db_message is None:
+                    return
+                db_message.raw_content = MessageUtils.to_db_record_msg(message.raw_message)
+                db_message.processed_plain_text = message.processed_plain_text
+                session.add(db_message)
+
+    @staticmethod
     def fill_reply_frequency_if_available(message: "SessionMessage") -> None:
         """在消息入库前补充当前会话的生效回复频率。"""
 

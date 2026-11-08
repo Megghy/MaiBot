@@ -2,15 +2,30 @@
 
 from __future__ import annotations
 
+import base64
+from collections import OrderedDict
+import io
 import time
 from typing import TYPE_CHECKING, Literal
 
+from PIL import Image, ImageOps
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from sqlmodel import select
 
+from src.common.data_models.message_component_data_model import (
+    AtComponent,
+    EmojiComponent,
+    ForwardNodeComponent,
+    ImageComponent,
+    TextComponent,
+    VoiceComponent,
+)
 from src.common.logger import get_logger
 from src.config.config import global_config
+from src.maisaka.context.history import build_session_message_visible_text
 from src.maisaka.context.messages import SessionBackedMessage
 from src.maisaka.monitor.events import emit_turn_decision
+from src.maisaka.visual.chat_history_refresher import _refresh_pending_visual_components
 from src.plugin_runtime.host.hook_spec_registry import HookSpec
 from src.plugin_runtime.host.message_utils import PluginMessageUtils
 from src.plugin_runtime.integration import get_plugin_runtime_manager
@@ -21,6 +36,7 @@ if TYPE_CHECKING:
     from src.maisaka.turn_trigger.scheduler import MessageTurnScheduler
 
 HOOK_NAME = "maisaka.turn.decide"
+IMAGE_PROCESSING_PLACEHOLDER = "[图片，识别中.....]"
 logger = get_logger("maisaka_turn_scheduler")
 PRIVATE_DIRECT_REPLY_REFERENCE = (
     "按语境自然简短回应: 日常提问或聊正事就直接接话解答; "
@@ -92,8 +108,233 @@ def has_turn_decision_owner(runtime: MaisakaHeartFlowChatting) -> bool:
     )
 
 
+JEV_MAX_IMAGES = 6
+JEV_RECENT_IMAGE_MESSAGE_WINDOW = 15
+JEV_RECENT_IMAGE_MAX_AGE_SECONDS = 1800.0
+JEV_IMAGE_MIN_SIDE = 280
+JEV_IMAGE_MAX_SIDE = 800
+JEV_IMAGE_HARD_MAX_SIDE = 1568
+_JEV_IMAGE_CACHE_LIMIT = 32
+_JEV_IMAGE_ASSET_CACHE: OrderedDict[str, dict[str, str]] = OrderedDict()
+
+
+def _encode_jev_image_asset(image_bytes: bytes) -> dict[str, str] | None:
+    if not image_bytes:
+        return None
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as opened:
+            img = ImageOps.exif_transpose(opened)
+            if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+                rgba = img.convert("RGBA")
+                bg = Image.new("RGB", rgba.size, (255, 255, 255))
+                bg.paste(rgba, mask=rgba.getchannel("A"))
+                img = bg
+            elif img.mode != "RGB":
+                img = img.convert("RGB")
+
+            w, h = img.size
+            if max(w, h) > JEV_IMAGE_MAX_SIDE:
+                scale = JEV_IMAGE_MAX_SIDE / float(max(w, h))
+                w = max(1, int(round(w * scale)))
+                h = max(1, int(round(h * scale)))
+                img = img.resize((w, h), Image.Resampling.LANCZOS)
+
+            w, h = img.size
+            if min(w, h) < JEV_IMAGE_MIN_SIDE:
+                scale = JEV_IMAGE_MIN_SIDE / float(min(w, h))
+                if max(w, h) * scale <= JEV_IMAGE_HARD_MAX_SIDE:
+                    w = max(JEV_IMAGE_MIN_SIDE, int(round(w * scale)))
+                    h = max(JEV_IMAGE_MIN_SIDE, int(round(h * scale)))
+                    img = img.resize((w, h), Image.Resampling.LANCZOS)
+                w, h = img.size
+                if w < JEV_IMAGE_MIN_SIDE or h < JEV_IMAGE_MIN_SIDE:
+                    canvas_w = max(w, JEV_IMAGE_MIN_SIDE)
+                    canvas_h = max(h, JEV_IMAGE_MIN_SIDE)
+                    canvas = Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
+                    canvas.paste(img, ((canvas_w - w) // 2, (canvas_h - h) // 2))
+                    img = canvas
+
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=82, optimize=True)
+            return {
+                "format": "jpeg",
+                "data_base64": base64.b64encode(buf.getvalue()).decode("ascii"),
+            }
+    except Exception as exc:
+        logger.debug(f"编码 JEV 图片资产失败: {exc}")
+        return None
+
+
+def _read_image_component_bytes(component: ImageComponent) -> bytes:
+    if component.binary_data:
+        return component.binary_data
+    image_hash = (component.binary_hash or "").strip()
+    if not image_hash:
+        return b""
+    try:
+        from src.common.database.database import get_db_session
+        from src.common.database.database_model import Images, ImageType
+        from src.common.utils.path_utils import resolve_stored_image_path
+
+        with get_db_session(auto_commit=False) as session:
+            statement = select(Images).filter_by(image_hash=image_hash, image_type=ImageType.IMAGE).limit(1)
+            if record := session.exec(statement).first():
+                image_path = resolve_stored_image_path(record.full_path)
+                if image_path.is_file():
+                    return image_path.read_bytes()
+    except Exception as exc:
+        logger.debug(f"读取 JEV 图片原文件失败 hash={image_hash}: {exc}")
+    return b""
+
+
+def _get_or_encode_jev_image_asset(component: ImageComponent) -> dict[str, str] | None:
+    image_hash = (component.binary_hash or "").strip()
+    if image_hash and image_hash in _JEV_IMAGE_ASSET_CACHE:
+        _JEV_IMAGE_ASSET_CACHE.move_to_end(image_hash)
+        return _JEV_IMAGE_ASSET_CACHE[image_hash]
+
+    raw_bytes = _read_image_component_bytes(component)
+    asset = _encode_jev_image_asset(raw_bytes)
+    if asset is not None and image_hash:
+        _JEV_IMAGE_ASSET_CACHE[image_hash] = asset
+        while len(_JEV_IMAGE_ASSET_CACHE) > _JEV_IMAGE_CACHE_LIMIT:
+            _JEV_IMAGE_ASSET_CACHE.popitem(last=False)
+    return asset
+
+
+def _render_jev_message_text(
+    message: SessionMessage,
+    msg_comp_to_asset: dict[tuple[str, int], str],
+) -> str:
+    parts: list[str] = []
+    for idx, component in enumerate(message.raw_message.components):
+        if isinstance(component, TextComponent):
+            parts.append(component.text)
+        elif isinstance(component, AtComponent):
+            target_name = (
+                component.target_user_cardname
+                or component.target_user_nickname
+                or component.target_user_id
+            )
+            parts.append(f"@{target_name} ")
+        elif isinstance(component, ImageComponent):
+            if asset_key := msg_comp_to_asset.get((message.message_id, idx)):
+                parts.append(f"[图片: {asset_key}]")
+            else:
+                parts.append("[图片]")
+        elif isinstance(component, EmojiComponent):
+            content = component.content.strip()
+            parts.append(content if content else "[表情包]")
+        elif isinstance(component, VoiceComponent):
+            content = component.content.strip()
+            parts.append(content if content else "[语音]")
+        elif isinstance(component, ForwardNodeComponent):
+            parts.append("[合并转发消息]")
+    rendered = "".join(parts).strip()
+    if rendered:
+        return rendered
+    fallback = (message.processed_plain_text or "").replace(IMAGE_PROCESSING_PLACEHOLDER, "[图片]").strip()
+    return fallback
+
+
+def _collect_jev_image_assets(
+    recent_items: list[SessionBackedMessage],
+    pending_messages: list[SessionMessage],
+    now_ts: float,
+) -> tuple[dict[str, dict[str, str]], dict[str, list[str]], dict[tuple[str, int], str]]:
+    assets: dict[str, dict[str, str]] = {}
+    msg_images: dict[str, list[str]] = {}
+    msg_comp_to_asset: dict[tuple[str, int], str] = {}
+    hash_to_key: dict[str, str] = {}
+
+    quoted_ids = {
+        str(msg.reply_to)
+        for msg in pending_messages
+        if getattr(msg, "reply_to", "")
+    }
+    eligible_recent_ids = set(quoted_ids)
+    for item in recent_items[-JEV_RECENT_IMAGE_MESSAGE_WINDOW:]:
+        if now_ts - item.timestamp.timestamp() <= JEV_RECENT_IMAGE_MAX_AGE_SECONDS:
+            eligible_recent_ids.add(item.message_id)
+
+    ordered_candidates: list[SessionMessage] = list(reversed(pending_messages))
+    for item in reversed(recent_items):
+        if item.message_id in eligible_recent_ids:
+            ordered_candidates.append(item.original_message)
+
+    selected_pairs: list[tuple[str, int, str, dict[str, str]]] = []
+    seen_msg_comp: set[tuple[str, int]] = set()
+    unique_hashes: set[str] = set()
+
+    for candidate in ordered_candidates:
+        components = getattr(getattr(candidate, "raw_message", None), "components", None) or []
+        for idx, component in enumerate(components):
+            if not isinstance(component, ImageComponent):
+                continue
+            pair_key = (candidate.message_id, idx)
+            if pair_key in seen_msg_comp:
+                continue
+            img_hash = (component.binary_hash or "").strip() or f"{candidate.message_id}:{idx}"
+            if img_hash not in unique_hashes and len(unique_hashes) >= JEV_MAX_IMAGES:
+                continue
+            asset = _get_or_encode_jev_image_asset(component)
+            if asset is None:
+                continue
+            seen_msg_comp.add(pair_key)
+            unique_hashes.add(img_hash)
+            selected_pairs.append((candidate.message_id, idx, img_hash, asset))
+
+    # 按消息在上下文中的自然顺序分配 img_1, img_2...
+    for msg_id, idx, img_hash, asset in reversed(selected_pairs):
+        asset_key = hash_to_key.get(img_hash)
+        if asset_key is None:
+            asset_key = f"img_{len(assets) + 1}"
+            hash_to_key[img_hash] = asset_key
+            assets[asset_key] = asset
+        msg_comp_to_asset[(msg_id, idx)] = asset_key
+        refs = msg_images.setdefault(msg_id, [])
+        if asset_key not in refs:
+            refs.append(asset_key)
+
+    return assets, msg_images, msg_comp_to_asset
+
+
 def build_turn_request(runtime: MaisakaHeartFlowChatting, messages: list[SessionMessage]) -> dict[str, object]:
     stream = runtime.chat_stream
+    now_ts = time.time()
+    recent_items = [
+        item
+        for item in runtime._chat_history[-40:]
+        if isinstance(item, SessionBackedMessage) and item.source in {"user", "guided_reply"}
+    ]
+    for item in recent_items:
+        if _refresh_pending_visual_components(item.original_message.raw_message.components):
+            item.visible_text = build_session_message_visible_text(
+                item.original_message,
+                raw_message=item.original_message.raw_message,
+            )
+    for message in messages:
+        _refresh_pending_visual_components(message.raw_message.components)
+
+    assets, msg_images, msg_comp_to_asset = _collect_jev_image_assets(recent_items, messages, now_ts)
+
+    pending_payloads: list[dict[str, object]] = []
+    for message in messages:
+        msg_dict = PluginMessageUtils._session_message_to_dict(message, include_binary_data=False)
+        msg_dict["processed_plain_text"] = _render_jev_message_text(message, msg_comp_to_asset)
+        if image_refs := msg_images.get(message.message_id):
+            msg_dict["images"] = image_refs
+        raw_components = msg_dict.get("components")
+        if isinstance(raw_components, list):
+            for idx, comp_dict in enumerate(raw_components):
+                if not isinstance(comp_dict, dict) or comp_dict.get("type") != "image":
+                    continue
+                if asset_key := msg_comp_to_asset.get((message.message_id, idx)):
+                    comp_dict["content"] = f"[图片: {asset_key}]"
+                else:
+                    comp_dict["content"] = "[图片]"
+        pending_payloads.append(msg_dict)
+
     return {
         "version": 1,
         "session_id": runtime.session_id,
@@ -103,12 +344,11 @@ def build_turn_request(runtime: MaisakaHeartFlowChatting, messages: list[Session
         "bot_name": global_config.bot.nickname,
         "personality": global_config.personality.personality,
         "forced": runtime._has_forced_turn_trigger(),
-        "timestamp": time.time(),
+        "timestamp": now_ts,
         "last_reply_at": next((item.timestamp.timestamp() for item in reversed(runtime._chat_history)
                                if item.source == "guided_reply"), 0.0),
-        "pending_messages": [
-            PluginMessageUtils._session_message_to_dict(message, include_binary_data=False) for message in messages
-        ],
+        "assets": assets,
+        "pending_messages": pending_payloads,
         "recent_messages": [
             {
                 "message_id": item.message_id,
@@ -116,14 +356,14 @@ def build_turn_request(runtime: MaisakaHeartFlowChatting, messages: list[Session
                 "sender": (item.original_message.message_info.user_info.user_cardname
                            or item.original_message.message_info.user_info.user_nickname),
                 "reply_to": item.original_message.reply_to,
-                "text": item.processed_plain_text,
+                "text": _render_jev_message_text(item.original_message, msg_comp_to_asset),
+                "images": msg_images.get(item.message_id, []),
                 "is_self": item.source == "guided_reply",
                 "is_at": bool(item.original_message.is_at),
                 "is_mentioned": bool(item.original_message.is_mentioned),
                 "timestamp": item.timestamp.timestamp(),
             }
-            for item in runtime._chat_history[-40:]
-            if isinstance(item, SessionBackedMessage) and item.source in {"user", "guided_reply"}
+            for item in recent_items
         ],
     }
 

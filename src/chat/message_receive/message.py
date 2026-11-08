@@ -462,12 +462,22 @@ class SessionMessage(MaiMessage):
                         return matches[0] if matches else None
 
                 if db_msg := await asyncio.to_thread(load_original):
-                    component.target_message_content = db_msg.processed_plain_text
+                    resolved_text = db_msg.processed_plain_text or ""
+                    if db_msg.raw_content and (not resolved_text or "[图片，识别中" in resolved_text):
+                        from src.maisaka.context.history import build_visible_text_from_sequence
+                        from src.maisaka.visual.chat_history_refresher import _refresh_pending_visual_components
+
+                        raw_seq = MessageUtils.from_db_record_msg_to_MaiSeq(db_msg.raw_content)
+                        await asyncio.to_thread(_refresh_pending_visual_components, raw_seq.components)
+                        refreshed_text = build_visible_text_from_sequence(raw_seq).strip()
+                        if refreshed_text:
+                            resolved_text = refreshed_text
+                    component.target_message_content = resolved_text
                     component.target_message_sender_cardname = db_msg.user_cardname
                     component.target_message_sender_nickname = db_msg.user_nickname
                     component.target_message_sender_id = db_msg.user_id
                     tgt_msg_s_name = db_msg.user_cardname or db_msg.user_nickname or db_msg.user_id
-                    return f"[回复了{tgt_msg_s_name}的消息: {db_msg.processed_plain_text}]"
+                    return f"[回复了{tgt_msg_s_name}的消息: {resolved_text}]"
             except Exception as e:
                 logger.error(f"查询回复消息时发生错误: {e}")
 
