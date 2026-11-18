@@ -10,21 +10,26 @@ from src.services.llm_service import LLMServiceClient
 logger = get_logger("llm_sentence_splitter")
 
 _NO_SPLIT_MARKER = "no_split"
+_SINGLE_LINE_CHAR_LIMIT = 15
 
 
-_SPLITTER_PROMPT = """你是一个即时通讯（QQ群聊）消息断句助手。请把下面这条即将发送的回复，按自然聊天的停顿和节奏拆成适合分条发送的短消息。
+_SPLITTER_PROMPT = """你是一个即时通讯（QQ群聊）消息断句助手。请判断下面这条即将发送的回复是否适合拆成多条短消息。
 要求：
-1. 只能返回 JSON 字符串数组，例如 ["第一句", "第二句"]，不要 Markdown、解释或代码块。
-2. 必须完整保留原文的每一个文字和标点符号（包括逗号、句号、问号、感叹号，绝对不要删改或增补任何字词或标点），只能在原文已有位置切分，程序会自动处理段尾逗号。
+1. 只能返回 JSON 字符串数组，例如 ["第一句", "第二句"]，或者返回 "no_split"，不要 Markdown、解释或代码块。
+2. 必须完整保留原文的每一个文字和标点符号（包括空格、逗号、句号、问号、感叹号，绝对不要删改或增补任何字词或标点），只能在原文已有位置切分，程序会自动处理段尾逗号。
 3. 不要把括号、引号、颜文字、英文单词、数字或代码从中间拆开。
-4. 当原文包含多个分句、多个情绪转折、或者由逗号、句号、分号、问号、感叹号、换行、明显空格隔开的多个意群时，应拆成 2~3 条气泡消息，让发送节奏像真人连续打字一样自然；只有单一短句，或完整代码、公式、表格、结构化清单（拆分会破坏阅读）时，才返回 "no_split"。
+4. 15字以内的单行短句一律保持一行，返回 "no_split"。只有当原文包含换行符，或者超过15字且确实包含多个独立意群/明显情绪转折时，才按自然停顿拆成 2~3 条气泡消息；若是句意连贯、仅用空格或单个逗号作轻度停顿的短吐槽/单句（约16~22字以内），优先返回 "no_split" 保持一行。完整代码、公式、表格、结构化清单也返回 "no_split"。
 
 示例：
-原文：一眼淀粉肠，你这是吃出什么心理暗示了
-输出：["一眼淀粉肠，", "你这是吃出什么心理暗示了"]
+原文：大乱炖
+五秒火速参悟
+输出：["大乱炖", "五秒火速参悟"]
 
-原文：诶我有chrome啊 好家伙 真名直接焊在Chrome上了
-输出：["诶我有chrome啊", "好家伙", "真名直接焊在Chrome上了"]
+原文：算盘珠子崩脸上了 线上嫌菜 线下另算
+输出：["算盘珠子崩脸上了", "线上嫌菜", "线下另算"]
+
+原文：一眼淀粉肠 你心理暗示啥呢
+输出："no_split"
 
 原文：确实挺离谱的
 输出："no_split"
@@ -158,16 +163,20 @@ def _extract_trailing_comma(sentence: str) -> Tuple[str, str]:
 
 async def split_text_with_llm(text: str) -> List[Tuple[str, str]]:
     """调用 LLM 断句，并返回兼容规则断句器的句子元组。"""
-    if not text:
+    normalized = text.strip()
+    if not normalized:
         return []
 
+    if "\n" not in normalized and len("".join(normalized.split())) <= _SINGLE_LINE_CHAR_LIMIT:
+        return [_extract_trailing_comma(normalized)]
+
     client = LLMServiceClient(task_name="fast_model", request_type="response.splitter")
-    result = await client.generate_response(_SPLITTER_PROMPT + text)
+    result = await client.generate_response(_SPLITTER_PROMPT + normalized)
     payload = _normalize_json_payload(result.response)
 
     # 模型判断不需要拆分时只返回标记，此时作为单独一段，并同样处理段尾逗号
     if _is_no_split_marker(payload):
-        return [_extract_trailing_comma(text)]
+        return [_extract_trailing_comma(normalized)]
 
     try:
         sentences = json.loads(payload)
@@ -180,8 +189,8 @@ async def split_text_with_llm(text: str) -> List[Tuple[str, str]]:
     if not isinstance(sentences, list) or not sentences or not all(isinstance(item, str) for item in sentences):
         raise ValueError("LLM 断句结果必须是非空字符串数组")
     if sentences == [_NO_SPLIT_MARKER]:
-        return [_extract_trailing_comma(text)]
+        return [_extract_trailing_comma(normalized)]
 
     # 逐字对齐切分片段与原文（兼容边界漏逗号），并还原为原文切片再分离段尾逗号。
-    original_sentences = _align_sentences_to_original(text, sentences)
+    original_sentences = _align_sentences_to_original(normalized, sentences)
     return [_extract_trailing_comma(sentence) for sentence in original_sentences]
