@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypedDict
 
 from json_repair import repair_json
+from sqlalchemy import func
 from sqlmodel import col, select
 
 import asyncio
@@ -29,7 +30,9 @@ from .learning_text import extract_learning_text
 logger = get_logger("jargon")
 
 llm_inference = LLMServiceClient(task_name="learner", request_type="jargon.inference")
-JARGON_INFERENCE_THRESHOLDS = [4, 8, 25, 100]
+JARGON_INFERENCE_THRESHOLDS = [2, 5, 15, 50]
+MAX_EVIDENCE_GROUPS_PER_JARGON = 12
+_INFERENCE_CONCURRENCY_SEMAPHORE = asyncio.Semaphore(2)
 
 
 class JargonEvidenceMessageRef(TypedDict):
@@ -139,8 +142,9 @@ class JargonMiner:
         self.session_name = session_name
 
         # Cache 相关
-        self.cache_limit = 50
+        self.cache_limit = 200
         self.cache: OrderedDict[str, None] = OrderedDict()
+        self._cache_warmed_session_id: Optional[str] = None
         # 黑话提取锁，防止并发执行
         self._extraction_lock = asyncio.Lock()
 
@@ -260,8 +264,42 @@ class JargonMiner:
             normalized_groups.append(group)
         return normalized_groups
 
+    def _warm_cache_from_db(self) -> None:
+        """从数据库加载当前会话作用域内未完成推断的黑话候选到内存缓存。"""
+        if not self.session_id:
+            return
+        try:
+            related_session_ids, _ = JargonConfigUtils.resolve_jargon_group_scope(self.session_id)
+            with get_db_session(auto_commit=False) as session:
+                records = session.exec(
+                    select(Jargon)
+                    .where(col(Jargon.is_complete).is_(False))
+                    .order_by(col(Jargon.updated_timestamp).desc(), col(Jargon.id).desc())
+                ).all()
+            for item in records:
+                content = str(item.content or "").strip()
+                if not content or is_single_char_jargon(content):
+                    continue
+                if not item.is_global:
+                    if not item.session_id_dict:
+                        continue
+                    try:
+                        session_id_dict = json.loads(item.session_id_dict)
+                    except Exception:
+                        continue
+                    if not related_session_ids.intersection(session_id_dict):
+                        continue
+                self._add_to_cache(content)
+                if len(self.cache) >= self.cache_limit:
+                    break
+            self._cache_warmed_session_id = self.session_id
+        except Exception as exc:
+            logger.warning(f"预热黑话缓存失败: session_id={self.session_id}, error={exc}")
+
     def get_cached_jargons(self) -> List[str]:
         """获取缓存中的所有黑话列表"""
+        if self._cache_warmed_session_id != self.session_id:
+            self._warm_cache_from_db()
         return list(self.cache.keys())
 
     @staticmethod
@@ -322,11 +360,12 @@ class JargonMiner:
                 else:
                     removed_count += 1
 
-        cleaned_evidence_messages = json.dumps(valid_groups, ensure_ascii=False) if valid_groups else None
+        cleaned_groups = valid_groups[-MAX_EVIDENCE_GROUPS_PER_JARGON:]
+        cleaned_evidence_messages = json.dumps(cleaned_groups, ensure_ascii=False) if cleaned_groups else None
         changed = removed_count > 0 or cleaned_evidence_messages != jargon_obj.evidence_messages
         if removed_count:
             logger.info(f"jargon {jargon_obj.content} 移除了 {removed_count} 组缺失或无有效文本的证据消息引用")
-        return context_texts, cleaned_evidence_messages, changed
+        return context_texts[-MAX_EVIDENCE_GROUPS_PER_JARGON:], cleaned_evidence_messages, changed
 
     @staticmethod
     def _load_json_list(value: Optional[str], field_name: str) -> List[Any]:
@@ -410,10 +449,7 @@ class JargonMiner:
         raw_content_list, cleaned_evidence_messages, evidence_changed = await asyncio.to_thread(
             self._load_evidence_contexts, jargon_obj
         )
-        used_evidence_messages = bool(raw_content_list)
-        if used_evidence_messages:
-            await asyncio.to_thread(self._cleanup_jargon_evidence_messages, jargon_obj, None)
-        elif evidence_changed:
+        if evidence_changed:
             await asyncio.to_thread(self._cleanup_jargon_evidence_messages, jargon_obj, cleaned_evidence_messages)
 
         if not raw_content_list:
@@ -525,7 +561,7 @@ class JargonMiner:
 
         inferred_meaning = str(inference1.get("meaning", "") or "").strip()
         finalized_meaning = inferred_meaning if is_jargon else previous_meaning
-        is_complete = (jargon_obj.count or 0) >= 100
+        is_complete = (jargon_obj.count or 0) >= JARGON_INFERENCE_THRESHOLDS[-1]
         last_inference_count = jargon_obj.count or 0
         finalize_result = await self._get_runtime_manager().invoke_hook(
             "jargon.inference.before_finalize",
@@ -598,20 +634,21 @@ class JargonMiner:
         merged_entries: Dict[str, JargonEntry] = {}
         for entry in entries:
             content = entry["content"].strip()
+            content_key = content.lower()
 
             if person_name_filter and person_name_filter(content):
                 logger.info(f"条目 '{content}' 包含人物名称，已过滤")
                 continue
             raw_list = entry["raw_content"] or set()
             evidence_groups = entry["evidence_messages"]
-            if content in merged_entries:
-                merged_entries[content]["raw_content"].update(raw_list)
-                merged_entries[content]["evidence_messages"] = self._merge_evidence_message_groups(
-                    merged_entries[content]["evidence_messages"],
+            if content_key in merged_entries:
+                merged_entries[content_key]["raw_content"].update(raw_list)
+                merged_entries[content_key]["evidence_messages"] = self._merge_evidence_message_groups(
+                    merged_entries[content_key]["evidence_messages"],
                     evidence_groups,
                 )
             else:
-                merged_entries[content] = {
+                merged_entries[content_key] = {
                     "content": content,
                     "raw_content": set(raw_list),
                     "evidence_messages": self._merge_evidence_message_groups([], evidence_groups),
@@ -642,7 +679,9 @@ class JargonMiner:
             evidence_messages = entry["evidence_messages"]
             try:
                 with get_db_session(auto_commit=False) as session:
-                    jargon_items = session.exec(select(Jargon).filter_by(content=content)).all()
+                    jargon_items = session.exec(
+                        select(Jargon).where(func.lower(col(Jargon.content)) == content.lower())
+                    ).all()
             except Exception as e:
                 logger.error(f"查询黑话 '{content}' 失败: {e}")
                 continue
@@ -673,23 +712,26 @@ class JargonMiner:
             if matched_jargon:
                 if matched_jargon.created_by == JargonCreatedBy.MANUAL:
                     logger.debug(f"黑话 '{content}' 已存在手动记录，跳过 AI 更新与推断")
-                    self._add_to_cache(content)
+                    self._add_to_cache(matched_jargon.content)
                     continue
                 # 已存在记录，更新 count 和证据消息引用
                 self._update_jargon(matched_jargon, evidence_messages)
+                self._add_to_cache(matched_jargon.content)
                 if self._should_infer_meaning(matched_jargon):
                     asyncio.create_task(self._infer_meaning_by_id(matched_jargon.id))  # type: ignore
                 updated += 1
             else:
                 # 没找到匹配记录，创建新记录
-                session_dict_str = json.dumps({self.session_id: 1})
+                initial_count = max(1, len(evidence_messages))
+                retained_evidence = evidence_messages[-MAX_EVIDENCE_GROUPS_PER_JARGON:]
+                session_dict_str = json.dumps({self.session_id: initial_count})
                 now = datetime.now()
                 new_jargon = Jargon(
                     content=content,
-                    evidence_messages=json.dumps(evidence_messages, ensure_ascii=False) if evidence_messages else None,
+                    evidence_messages=json.dumps(retained_evidence, ensure_ascii=False) if retained_evidence else None,
                     session_id_dict=session_dict_str,
                     is_global=False,
-                    count=1,
+                    count=initial_count,
                     is_jargon=False,
                     meaning="",
                     created_by=JargonCreatedBy.AI,
@@ -700,8 +742,11 @@ class JargonMiner:
                     with get_db_session() as session:
                         session.add(new_jargon)
                         session.flush()
+                        new_jargon_id = new_jargon.id
                     saved += 1
                     self._add_to_cache(content)
+                    if new_jargon_id is not None and self._should_infer_meaning(new_jargon):
+                        asyncio.create_task(self._infer_meaning_by_id(new_jargon_id))
                 except Exception as e:
                     logger.error(f"保存新黑话 '{content}' 失败: {e}")
                     continue
@@ -766,19 +811,21 @@ class JargonMiner:
             logger.debug(f"黑话 '{db_jargon.content}' 是手动记录，跳过 AI 更新")
             return
 
-        db_jargon.count += 1
-        db_jargon.updated_timestamp = datetime.now()
         existing_evidence_groups = self._normalize_evidence_message_groups(
             self._load_json_list(db_jargon.evidence_messages, "evidence_messages")
         )
         merged_evidence_groups = self._merge_evidence_message_groups(existing_evidence_groups, evidence_message_groups)
+        added_group_count = max(1, len(merged_evidence_groups) - len(existing_evidence_groups))
+        retained_evidence_groups = merged_evidence_groups[-MAX_EVIDENCE_GROUPS_PER_JARGON:]
+        db_jargon.count = (db_jargon.count or 0) + added_group_count
+        db_jargon.updated_timestamp = datetime.now()
         db_jargon.evidence_messages = (
-            json.dumps(merged_evidence_groups, ensure_ascii=False)
-            if merged_evidence_groups
+            json.dumps(retained_evidence_groups, ensure_ascii=False)
+            if retained_evidence_groups
             else db_jargon.evidence_messages
         )
         session_id_dict: Dict[str, int] = json.loads(db_jargon.session_id_dict)
-        session_id_dict[self.session_id] = session_id_dict.get(self.session_id, 0) + 1
+        session_id_dict[self.session_id] = session_id_dict.get(self.session_id, 0) + added_group_count
         db_jargon.session_id_dict = json.dumps(session_id_dict)
 
         try:
@@ -864,14 +911,15 @@ class JargonMiner:
         return False if next_threshold is None else count >= next_threshold
 
     async def _infer_meaning_by_id(self, jargon_id: int):
-        jargon_obj: Optional[MaiJargon] = None
-        try:
-            with get_db_session() as session:
-                statement = select(Jargon).filter_by(id=jargon_id).limit(1)
-                if db_record := session.exec(statement).first():
-                    jargon_obj = MaiJargon.from_db_instance(db_record)
-        except Exception as e:
-            logger.error(f"查询Jargon id={jargon_id}失败: {e}")
-            return
-        if jargon_obj:
-            await self.infer_meaning(jargon_obj)
+        async with _INFERENCE_CONCURRENCY_SEMAPHORE:
+            jargon_obj: Optional[MaiJargon] = None
+            try:
+                with get_db_session() as session:
+                    statement = select(Jargon).filter_by(id=jargon_id).limit(1)
+                    if db_record := session.exec(statement).first():
+                        jargon_obj = MaiJargon.from_db_instance(db_record)
+            except Exception as e:
+                logger.error(f"查询Jargon id={jargon_id}失败: {e}")
+                return
+            if jargon_obj:
+                await self.infer_meaning(jargon_obj)

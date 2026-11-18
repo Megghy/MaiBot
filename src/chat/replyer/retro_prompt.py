@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from copy import copy
 from dataclasses import replace
-from datetime import datetime
 from functools import partial
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -32,7 +31,7 @@ from src.common.data_models.message_component_data_model import (
     ReplyComponent,
     TextComponent,
 )
-from src.common.utils.math_utils import translate_timestamp_to_human_readable
+from src.common.utils.math_utils import format_prompt_datetime, translate_timestamp_to_human_readable
 from src.config.config import global_config
 from src.llm_models.payload_content.context_item import (
     ContextImagePart,
@@ -79,6 +78,8 @@ RETRO_RECENT_IMAGE_MAX_SIDE = 640
 RETRO_OLDER_IMAGE_MAX_SIDE = 128
 RETRO_VISUAL_MESSAGE_WINDOW = 4
 RETRO_VISUAL_MAX_AGE_SECONDS = 300.0
+RETRO_IDLE_GAP_SECONDS = 600.0
+RETRO_EARLY_HISTORY_CUTOFF_SECONDS = 900.0
 
 
 def _resize_retro_image(part: ContextImagePart, max_side: int) -> ContextImagePart:
@@ -168,40 +169,58 @@ class RetroReplyPromptMixin:
             reply_requirements=reply_requirements,
             extra_info_block=str((reply_tool_args or {}).get("_extra_info_block") or ""),
         )
-        user_builder = ContextItemBuilder().set_role(RoleType.User)
+        reference_text = "".join(
+            str(template_context.get(key) or "")
+            for key in ("extra_info_block", "expression_habits_block")
+        ).strip()
+        if "extra_info_block" in template_context:
+            template_context["extra_info_block"] = ""
+        if "expression_habits_block" in template_context:
+            template_context["expression_habits_block"] = ""
+
+        plain_dialogue = str(template_context.get("dialogue_prompt") or "")
+        dialogue_marker = uuid4().hex
+        template_context["dialogue_prompt"] = dialogue_marker
+        rendered_prompt = self._load_prompt(prompt_name, **template_context)
+        if dialogue_marker in rendered_prompt:
+            prefix, suffix = rendered_prompt.split(dialogue_marker, 1)
+        else:
+            prefix, suffix = rendered_prompt, ""
+
+        dialogue_builder = ContextItemBuilder().set_role(RoleType.User)
         if enable_visual_message:
-            dialogue_marker = uuid4().hex
-            template_context["dialogue_prompt"] = dialogue_marker
-            prefix, suffix = self._load_prompt(prompt_name, **template_context).split(dialogue_marker)
-            pending_text = prefix
-            history_by_id = {
-                message.message_id: message
-                for message in chat_history
-                if isinstance(message, ContentContextMessage) and message.message_id
-            }
+            pending_text = prefix.lstrip()
             history_started = False
-            for message_index, message in enumerate(chat_history):
-                if not isinstance(message, ContentContextMessage):
-                    continue
-                history_line = self._render_retro_history_line(message, history_by_id)
-                if not history_line:
-                    continue
+            has_dialogue_parts = False
+            for message_index, history_line in self._iter_retro_dialogue_lines(chat_history):
                 pending_text += ("\n" if history_started else "") + history_line
                 history_started = True
                 image_parts = visual_parts.get(message_index, [])
                 if image_parts:
-                    # 在历史发言处插入图片，模板后半段的回复指令始终保持在最后。
-                    user_builder.add_text_content(pending_text)
+                    # 在历史发言处插入图片，后续的目标与回复指令拆分为独立 Block。
+                    dialogue_builder.add_text_content(pending_text)
                     pending_text = ""
+                    has_dialogue_parts = True
                     for part in image_parts:
-                        user_builder.add_image_content(part.image_format, part.image_base64)
-            user_builder.add_text_content(pending_text + suffix)
+                        dialogue_builder.add_image_content(part.image_format, part.image_base64)
+            if pending_text.rstrip() or not has_dialogue_parts:
+                dialogue_builder.add_text_content(pending_text.rstrip())
         else:
-            user_builder.add_text_content(self._load_prompt(prompt_name, **template_context))
+            dialogue_builder.add_text_content((prefix.lstrip() + plain_dialogue).strip())
+
         items = [
             ContextItemBuilder().set_role(RoleType.System).add_text_content(system_prompt).build(),
-            user_builder.build(),
         ]
+        if reference_text:
+            items.append(
+                ContextItemBuilder().set_role(RoleType.User).add_text_content(reference_text).build()
+            )
+        items.append(dialogue_builder.build())
+        instruction_text = suffix.strip()
+        if instruction_text:
+            items.append(
+                ContextItemBuilder().set_role(RoleType.User).add_text_content(instruction_text).build()
+            )
         return items
 
     @staticmethod
@@ -380,7 +399,7 @@ class RetroReplyPromptMixin:
             "expression_habits_block": "",
             "extra_info_block": self._build_retro_extra_info_block(merged_extra),
             "dialogue_prompt": self._build_retro_dialogue_block(chat_history),
-            "time_block": f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "time_block": f"当前时间：{format_prompt_datetime()}",
             "reply_target_block": self._build_retro_reply_target_block(reply_message, chat_history),
             "planner_reasoning": combined_reference,
             # 复古回复器对齐训练分布：关键词反应提示（"人机"否定/定型文模板等）
@@ -396,9 +415,9 @@ class RetroReplyPromptMixin:
         if not normalized_requirements:
             return ""
         return (
-            "以下是你在回复时需要参考的信息，现在请你阅读以下内容，进行决策\n"
+            "以下是过往背景记忆与你近期的历史发言记录（背景记忆仅供遇到直接相关话题时辅助理解，无关时绝不提及；若包含你近期已说过的推荐或回答，遇到同类提问时必须换新内容，严禁跨天复读同样的菜名或车轱辘话）\n"
             f"{normalized_requirements}\n"
-            "以上是你在回复时需要参考的信息，现在请你阅读以下内容，进行决策"
+            "以上背景记忆若与当前话头无关请直接忽略。"
         )
 
     def _build_retro_sender_name(
@@ -460,23 +479,62 @@ class RetroReplyPromptMixin:
             return f"现在{sender_name}{reference_text} 说：{target_content} 引起了你的注意"
         return f"现在{sender_name}说的：{target_content} 引起了你的注意"
 
-    def _build_retro_dialogue_block(self, chat_history: List[LLMContextMessage]) -> str:
-        """把聊天历史渲染成旧版那样的可读文本块。"""
+    def _iter_retro_dialogue_lines(
+        self,
+        chat_history: List[LLMContextMessage],
+    ) -> List[Tuple[int, str]]:
+        """遍历并渲染带时间断档与早晚期分界提示的复古对话行。"""
 
-        lines: List[str] = []
         history_by_id = {
             message.message_id: message
             for message in chat_history
             if isinstance(message, ContentContextMessage) and message.message_id
         }
+        content_messages = [m for m in chat_history if isinstance(m, ContentContextMessage)]
+        if not content_messages:
+            return []
 
-        for message in chat_history:
-            # 复用普通上下文的可见文本渲染，只调整复古模式的时间与说话人外层格式。
+        first_ts = content_messages[0].timestamp.timestamp()
+        latest_ts = content_messages[-1].timestamp.timestamp()
+        has_early_history = (latest_ts - first_ts) >= RETRO_EARLY_HISTORY_CUTOFF_SECONDS
+
+        results: List[Tuple[int, str]] = []
+        prev_ts: Optional[float] = None
+        cutoff_inserted = False
+        for message_index, message in enumerate(chat_history):
+            if not isinstance(message, ContentContextMessage):
+                continue
             history_line = self._render_retro_history_line(message, history_by_id)
-            if history_line:
-                lines.append(history_line)
+            if not history_line:
+                continue
 
-        return "\n".join(lines)
+            msg_ts = message.timestamp.timestamp()
+            prefix_notices: List[str] = []
+            if prev_ts is not None and (msg_ts - prev_ts) >= RETRO_IDLE_GAP_SECONDS:
+                gap_mins = int((msg_ts - prev_ts) // 60)
+                prefix_notices.append(f"--- [中间间隔了 {gap_mins} 分钟无人发言] ---")
+            if (
+                has_early_history
+                and not cutoff_inserted
+                and prev_ts is not None
+                and (latest_ts - msg_ts) < RETRO_EARLY_HISTORY_CUTOFF_SECONDS
+            ):
+                prefix_notices.append(
+                    "--- [以上是 15 分钟前的早期聊天记录，若与当前话头无关请勿翻旧账提及；以下是最近正在聊的内容] ---"
+                )
+                cutoff_inserted = True
+
+            prev_ts = msg_ts
+            if prefix_notices:
+                history_line = "\n".join([*prefix_notices, history_line])
+            results.append((message_index, history_line))
+
+        return results
+
+    def _build_retro_dialogue_block(self, chat_history: List[LLMContextMessage]) -> str:
+        """把聊天历史渲染成旧版那样的可读文本块。"""
+
+        return "\n".join(line for _, line in self._iter_retro_dialogue_lines(chat_history))
 
     def _render_retro_history_line(
         self,
@@ -501,7 +559,13 @@ class RetroReplyPromptMixin:
         elif bot_name and speaker == bot_name:
             speaker = "你"
 
-        timestamp = translate_timestamp_to_human_readable(message.timestamp.timestamp(), mode="normal_no_YMD")
+        msg_ts = message.timestamp.timestamp()
+        timestamp = translate_timestamp_to_human_readable(msg_ts, mode="normal_no_YMD")
+        if history_by_id:
+            latest_ts = max(item.timestamp.timestamp() for item in history_by_id.values())
+            diff_minutes = int(max(0.0, latest_ts - msg_ts) // 60)
+            rel_label = f"{diff_minutes}分钟前" if diff_minutes >= 2 else "刚刚"
+            timestamp = f"{timestamp} ({rel_label})"
         reference_text = " ".join(references)
         if references:
             prefix = f"[{timestamp}] {speaker or ''}{reference_text} 说："

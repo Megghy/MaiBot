@@ -12,14 +12,22 @@ logger = get_logger("llm_sentence_splitter")
 _NO_SPLIT_MARKER = "no_split"
 
 
-_SPLITTER_PROMPT = """
-请不要思考，快速地把下面的回复进行断句，按自然语义拆成若干条适合逐条发送的消息。
+_SPLITTER_PROMPT = """你是一个即时通讯（QQ群聊）消息断句助手。请把下面这条即将发送的回复，按自然聊天的停顿和节奏拆成适合分条发送的短消息。
 要求：
-1. 只能返回 JSON 字符串数组，例如 ["第一句。", "第二句？"]，不要 Markdown、解释或代码块。
-2. 只能在原文已有字符之间选择切分位置，不能改写文本、增删或调整顺序。
-3. 不要把括号、引号、颜文字或代码从中间拆开。如果是单独的句子，不要在在结尾留逗号。
-4. 如果是完整代码，公式，或者整理阅读更合适的文段，不需要拆分，返回"no_split"。
-5. 如果是本身比较短，或者表意清晰的句子，不需要拆分，返回"no_split"。
+1. 只能返回 JSON 字符串数组，例如 ["第一句", "第二句"]，不要 Markdown、解释或代码块。
+2. 必须完整保留原文的每一个文字和标点符号（包括逗号、句号、问号、感叹号，绝对不要删改或增补任何字词或标点），只能在原文已有位置切分，程序会自动处理段尾逗号。
+3. 不要把括号、引号、颜文字、英文单词、数字或代码从中间拆开。
+4. 当原文包含多个分句、多个情绪转折、或者由逗号、句号、分号、问号、感叹号、换行、明显空格隔开的多个意群时，应拆成 2~3 条气泡消息，让发送节奏像真人连续打字一样自然；只有单一短句，或完整代码、公式、表格、结构化清单（拆分会破坏阅读）时，才返回 "no_split"。
+
+示例：
+原文：一眼淀粉肠，你这是吃出什么心理暗示了
+输出：["一眼淀粉肠，", "你这是吃出什么心理暗示了"]
+
+原文：诶我有chrome啊 好家伙 真名直接焊在Chrome上了
+输出：["诶我有chrome啊", "好家伙", "真名直接焊在Chrome上了"]
+
+原文：确实挺离谱的
+输出："no_split"
 
 原文：
 """
@@ -56,35 +64,86 @@ _PUNCTUATION_TABLE = {
 }
 
 
+def _normalize_char(char: str) -> str:
+    """将单个字符按标点表归一化，用于对齐比较。"""
+    return char.translate(_PUNCTUATION_TABLE)
+
+
 def _strip_whitespace(text: str) -> str:
     """去除全部空白字符，并把中英文标点按一一对应归一，用于宽松比较。"""
     return "".join(text.split()).translate(_PUNCTUATION_TABLE)
 
 
-def _map_sentences_to_original(text: str, sentences: List[str]) -> List[str]:
-    """按各句的非空白字符数，把切分位置映射回原文，丢弃句间空白。"""
-    counts = [len(_strip_whitespace(sentence)) for sentence in sentences]
-    counts = [count for count in counts if count > 0]
+def _align_sentences_to_original(text: str, sentences: List[str]) -> List[str]:
+    """逐字校验切分结果保留了原文，并返回精确对应的原文片段。
+
+    当模型偶尔在段尾切分处漏掉原文中的逗号（`，`/`,`）时，
+    在不改动任何其他字符的前提下把原文逗号归并到前一段末尾。
+    """
+    normalized_segments = [_strip_whitespace(sentence) for sentence in sentences]
+    normalized_segments = [segment for segment in normalized_segments if segment]
+    if not normalized_segments:
+        raise ValueError("LLM 断句结果不包含有效内容")
+
     result: List[str] = []
-    start = 0
-    consumed = 0
-    target = 0
-    for index, count in enumerate(counts):
-        target += count
-        if index == len(counts) - 1:
-            result.append(text[start:])
+    pos = 0
+    text_len = len(text)
+
+    for seg_idx, segment_chars in enumerate(normalized_segments):
+        while pos < text_len and text[pos].isspace():
+            pos += 1
+        seg_start = pos
+
+        for expected_char in segment_chars:
+            while pos < text_len and text[pos].isspace():
+                pos += 1
+            if pos >= text_len or _normalize_char(text[pos]) != expected_char:
+                actual_snippet = text[max(0, pos - 10) : min(text_len, pos + 15)]
+                raise ValueError(
+                    "LLM 断句结果未完整保留原文（忽略空白后）："
+                    f"原文位置={pos}，期望={expected_char!r}，原文片段={actual_snippet!r}"
+                )
+            pos += 1
+
+        sentence_end = pos
+        is_last = seg_idx == len(normalized_segments) - 1
+
+        if is_last:
+            # 末尾若仅因模型漏掉收尾逗号，一并吸收；其他非空白剩余视为篡改原文
+            while pos < text_len and text[pos].isspace():
+                pos += 1
+            if pos < text_len and text[pos] in "，,":
+                pos += 1
+                sentence_end = pos
+                while pos < text_len and text[pos].isspace():
+                    pos += 1
+            if pos < text_len:
+                raise ValueError(
+                    "LLM 断句结果未完整保留原文结尾："
+                    f"未匹配剩余={text[pos : pos + 25]!r}"
+                )
+            result.append(text[seg_start:sentence_end])
             break
-        end = start
-        while consumed < target:
-            if not text[end].isspace():
-                consumed += 1
-            end += 1
-        sentence_end = end
-        while end < len(text) and text[end].isspace():
-            end += 1
-        # 段尾逗号后的空白要保留，供分隔符还原；其他句间空白在逐条发送时无意义，直接丢弃。
-        result.append(text[start : end if text[sentence_end - 1] in "，," else sentence_end])
-        start = end
+
+        # 若模型在断句边界漏写了原文里的分隔逗号，把该逗号归属到当前段末尾
+        next_starts_with_comma = normalized_segments[seg_idx + 1].startswith(",")
+        if not next_starts_with_comma:
+            probe = pos
+            while probe < text_len and text[probe].isspace():
+                probe += 1
+            if probe < text_len and text[probe] in "，,":
+                pos = probe + 1
+                sentence_end = pos
+
+        trailing_end = pos
+        while trailing_end < text_len and text[trailing_end].isspace():
+            trailing_end += 1
+
+        # 段尾逗号后的空白保留供分隔符还原；其他句间空白在逐条发送时无意义，直接丢弃
+        slice_end = trailing_end if text[sentence_end - 1] in "，," else sentence_end
+        result.append(text[seg_start:slice_end])
+        pos = trailing_end
+
     return result
 
 
@@ -123,29 +182,6 @@ async def split_text_with_llm(text: str) -> List[Tuple[str, str]]:
     if sentences == [_NO_SPLIT_MARKER]:
         return [_extract_trailing_comma(text)]
 
-    # 模型常自行增删空格（如中英文间补空格），校验时忽略全部空白，仅要求其余字符完整保留。
-    comparison_text = _strip_whitespace(text)
-    reconstructed_text = _strip_whitespace("".join(sentences))
-    if reconstructed_text != comparison_text:
-        # 显示首处差异；repr 让标点差异可见。
-        mismatch_index = next(
-            (
-                index
-                for index, (original, returned) in enumerate(zip(comparison_text, reconstructed_text, strict=False))
-                if original != returned
-            ),
-            min(len(comparison_text), len(reconstructed_text)),
-        )
-        context_start = max(0, mismatch_index - 20)
-        context_end = mismatch_index + 21
-        raise ValueError(
-            "LLM 断句结果未完整保留原文（忽略空白后）："
-            f"首个差异位置={mismatch_index}（从 0 开始），"
-            f"原文长度={len(comparison_text)}，结果长度={len(reconstructed_text)}，"
-            f"原文片段={comparison_text[context_start:context_end]!r}，"
-            f"结果片段={reconstructed_text[context_start:context_end]!r}"
-        )
-
-    # 按切分点还原为原文片段，避免模型改动的空白进入最终消息；再分离段尾逗号。
-    original_sentences = _map_sentences_to_original(text, sentences)
+    # 逐字对齐切分片段与原文（兼容边界漏逗号），并还原为原文切片再分离段尾逗号。
+    original_sentences = _align_sentences_to_original(text, sentences)
     return [_extract_trailing_comma(sentence) for sentence in original_sentences]

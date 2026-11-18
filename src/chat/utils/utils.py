@@ -278,179 +278,262 @@ async def get_embedding(text: str, request_type: str = "embedding") -> Optional[
     return embedding
 
 
-def _split_into_sentence_segments(text: str) -> list[tuple[str, str]]:
-    """将文本分割成 (句子, 尾随分隔符) 元组，并根据概率合并
-    1. 识别分割点（, ， 。 ; 空格），但如果分割点左右都是英文字母则不分割。
-    2. 将文本分割成 (内容, 分隔符) 的元组。
-    3. 根据原始文本长度计算合并概率，概率性地合并相邻段落。
-    注意：此函数假定颜文字已在上层被保护。
-    Args:
-        text: 要分割的文本字符串 (假定颜文字已被保护)
-    Returns:
-        List[Tuple[str, str]]: 分割和合并后的 (句子, 尾随分隔符) 列表，
-        尾随分隔符是原始文本中紧跟该句的分隔符（最后一句为空字符串），
-        供后续把多句压缩回一条消息时恢复句间停顿。
-    """
-    # 预处理：处理多余的换行符
-    # 1. 将连续的换行符替换为单个换行符（保留换行符用于分割）
-    text = re.sub(r"\n\s*\n+", "\n", text)
-    # 2. 处理换行符和其他分隔符的组合（保留换行符，删除其他分隔符）
-    text = re.sub(r"\n\s*([，,。;\s])", r"\n\1", text)
-    text = re.sub(r"([，,。;\s])\s*\n", r"\1\n", text)
+_OPEN_TO_CLOSE_QUOTES = {
+    '"': '"',
+    "'": "'",
+    "“": "”",
+    "‘": "’",
+    "「": "」",
+    "『": "』",
+}
+_CLOSING_QUOTE_CHARS = {"”", "’", "」", "』"}
+_TERMINAL_PUNCT_CHARS = {"？", "?", "！", "!"}
+_DISCARD_SEPARATORS = {"，", ",", " ", "。", ";", "；", "\n"}
+_CHINESE_BRACKET_PATTERN = re.compile(r"[(\[（](?=.*[一-鿿]).*?[)\]）]")
+_KAOMOJI_PLACEHOLDER_PATTERN = re.compile(r"__KAOMOJI_\d+__")
 
-    # 处理两个汉字中间的换行符（保留换行符，不替换为句号，让换行符强制分割）
-    # text = re.sub(r"([\u4e00-\u9fff])\n([\u4e00-\u9fff])", r"\1。\2", text)  # 注释掉，保留换行符用于分割
 
-    len_text = len(text)
-    if len_text < 3:
-        if random.random() < 0.01:
-            return [(char, "") for char in text]
-        return [(text, "")]
+def _compute_inside_quote_mask(text: str) -> list[bool]:
+    """仅对真正成对闭合的同段引号区间标记为 True，避免未闭合引号或英文撇号锁死后续分段。"""
+    inside_quote = [False] * len(text)
+    quote_stack: list[tuple[int, str]] = []
 
-    # 先标记哪些位置位于成对引号内部，避免在引号内部进行句子分割
-    # 支持的引号包括：中英文单/双引号和常见中文书名号/引号
-    quote_chars = {
-        '"',
-        "'",
-        "“",
-        "”",
-        "‘",
-        "’",
-        "「",
-        "」",
-        "『",
-        "』",
-    }
-    inside_quote = [False] * len_text
-    in_quote = False
-    current_quote_char = ""
     for idx, ch in enumerate(text):
-        if ch in quote_chars:
-            # 遇到引号时切换状态（英文引号本身开闭相同，用同一个字符表示）
-            if not in_quote:
-                in_quote = True
-                current_quote_char = ch
-                inside_quote[idx] = False
-            else:
-                # 只有遇到同一类引号才视为关闭
-                if ch == current_quote_char or ch in {'"', "'"} and current_quote_char in {'"', "'"}:
-                    in_quote = False
-                    current_quote_char = ""
-                inside_quote[idx] = False
-        else:
-            inside_quote[idx] = in_quote
+        if ch == "\n":
+            # 聊天文本的引用不跨换行，换行即重置未闭合引号栈防止污染后续行
+            quote_stack.clear()
+            continue
 
-    # 定义分隔符（包含换行符）
-    separators = {"，", ",", " ", "。", ";", "\n"}
-    segments = []
+        if ch == "'" and idx > 0:
+            prev_char = text[idx - 1]
+            next_char = text[idx + 1] if idx + 1 < len(text) else ""
+            # 跳过英文缩写（it's / don't）和未开引号的英语所有格（girls'）
+            if prev_char.isascii() and prev_char.isalnum() and next_char.isascii() and next_char.isalnum():
+                continue
+            if prev_char.lower() == "s" and not any(expected == "'" for _, expected in quote_stack):
+                continue
+
+        if quote_stack and ch == quote_stack[-1][1]:
+            open_idx, _ = quote_stack.pop()
+            for inner_idx in range(open_idx + 1, idx):
+                inside_quote[inner_idx] = True
+        elif ch in _CLOSING_QUOTE_CHARS:
+            match_pos = next(
+                (pos for pos in range(len(quote_stack) - 1, -1, -1) if quote_stack[pos][1] == ch),
+                None,
+            )
+            if match_pos is not None:
+                open_idx, _ = quote_stack[match_pos]
+                del quote_stack[match_pos:]
+                for inner_idx in range(open_idx + 1, idx):
+                    inside_quote[inner_idx] = True
+        elif ch in _OPEN_TO_CLOSE_QUOTES:
+            quote_stack.append((idx, _OPEN_TO_CLOSE_QUOTES[ch]))
+
+    return inside_quote
+
+
+def _is_inside_url(text: str, index: int) -> bool:
+    """判断指定位置是否处于 http(s) URL 内部，避免误切查询参数标点。"""
+    if text[index].isspace():
+        return False
+    token_start = index
+    while token_start > 0 and not text[token_start - 1].isspace():
+        token_start -= 1
+    token_prefix = text[token_start : index + 1].lower()
+    return token_prefix.startswith(("http://", "https://"))
+
+
+def _can_split_on_terminal_punct(text: str, index: int) -> bool:
+    """判断句末感叹号/问号后是否适合作为切分边界。"""
+    if _is_inside_url(text, index):
+        return False
+    char = text[index]
+    if char in {"?", "!"} and index + 1 < len(text):
+        next_char = text[index + 1]
+        if next_char.isascii() and next_char.isalnum():
+            return False
+    return True
+
+
+def _can_split_on_discard_separator(text: str, index: int) -> bool:
+    """判断逗号/句号/分号/空格/换行是否可作为切分点。"""
+    char = text[index]
+    if char == "\n":
+        return True
+    if _is_inside_url(text, index):
+        return False
+    if index > 0 and text[index - 1] in {":", "："}:
+        return False
+    if index < len(text) - 1 and text[index + 1] in {":", "："}:
+        return False
+    if char == " " and 0 < index < len(text) - 1:
+        prev_char = text[index - 1]
+        next_char = text[index + 1]
+        if prev_char in {"-", "—"} or next_char in {"-", "—"}:
+            return False
+        prev_is_alnum = prev_char.isdigit() or is_english_letter(prev_char)
+        next_is_alnum = next_char.isdigit() or is_english_letter(next_char)
+        if prev_is_alnum and next_is_alnum:
+            return False
+    return True
+
+
+def _collapse_spaced_single_chars(segments: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """把连续 3 个及以上由单个空格隔开的单字拼回整句（兼容刻意加空格风格）。"""
+    collapsed: list[tuple[str, str]] = []
+    idx = 0
+    total = len(segments)
+    while idx < total:
+        run_end = idx
+        while run_end < total:
+            content, sep = segments[run_end]
+            if len(content.strip()) != 1 or not content.strip():
+                break
+            if sep != " " and run_end > idx:
+                # 当前单字带非空格收尾标点时结束本次连续单字序列，并将其纳入整句
+                run_end += 1
+                break
+            if sep != " ":
+                break
+            run_end += 1
+
+        if run_end - idx >= 3:
+            merged_content = "".join(
+                content + (sep if pos < run_end - idx - 1 else "")
+                for pos, (content, sep) in enumerate(segments[idx:run_end])
+            )
+            collapsed.append((merged_content, segments[run_end - 1][1]))
+            idx = run_end
+        else:
+            collapsed.append(segments[idx])
+            idx += 1
+    return collapsed
+
+
+def _effective_segment_length(content: str) -> int:
+    """将颜文字占位符折算为实际视觉长度，避免占位符虚高影响合并阈值。"""
+    return len(_KAOMOJI_PLACEHOLDER_PATTERN.sub("XX", content.strip()))
+
+
+def _compute_merge_probability(
+    left_content: str,
+    left_sep: str,
+    right_content: str,
+    total_segments: int,
+) -> float:
+    """依据相邻两段自身长度与分隔符计算随机合并概率，避免短回复被高概率黏成一条。"""
+    if left_sep == "\n":
+        return 0.0
+    if left_content.rstrip().endswith(("？", "?", "！", "!")):
+        return 0.0
+
+    left_len = _effective_segment_length(left_content)
+    right_len = _effective_segment_length(right_content)
+    if left_len <= 2 or right_len <= 2:
+        return 0.65
+    if left_len + len(left_sep) + right_len > 28:
+        return 0.05
+    if left_sep in {"。", ";", "；"}:
+        return 0.10
+    if total_segments <= 3:
+        return 0.15
+    return 0.30
+
+
+def _collect_raw_sentence_segments(text: str, inside_quote: list[bool]) -> list[tuple[str, str]]:
+    """遍历文本收集基础 (句子, 分隔符) 元组。"""
+    len_text = len(text)
+    segments: list[tuple[str, str]] = []
     current_segment = ""
 
-    # 1. 分割成 (内容, 分隔符) 元组
     i = 0
-    while i < len(text):
+    while i < len_text:
         char = text[i]
-        if char in separators:
-            # 引号内部一律不作为分割点（包括换行）
-            if inside_quote[i]:
-                can_split = False
+        if not inside_quote[i] and char in _TERMINAL_PUNCT_CHARS and _can_split_on_terminal_punct(text, i):
+            current_segment += char
+            while i + 1 < len_text and text[i + 1] in _TERMINAL_PUNCT_CHARS and not inside_quote[i + 1]:
+                i += 1
+                current_segment += text[i]
+
+            probe = i + 1
+            while probe < len_text and text[probe].isspace():
+                probe += 1
+            if probe >= len_text:
+                i += 1
+                continue
+
+            trailing_sep = ""
+            if i + 1 < len_text and text[i + 1] == "\n":
+                trailing_sep = "\n"
+                i += 1
             else:
-                # 换行符在不在引号内时都强制分割
-                if char == "\n":
-                    can_split = True
-                else:
-                    # 检查分割条件
-                    can_split = True
-                    # 检查分隔符左右是否有冒号（中英文），如果有则不分割
-                    if i > 0:
-                        prev_char = text[i - 1]
-                        if prev_char in {":", "："}:
-                            can_split = False
-                    if i < len(text) - 1:
-                        next_char = text[i + 1]
-                        if next_char in {":", "："}:
-                            can_split = False
+                space_start = i + 1
+                space_end = space_start
+                while space_end < len_text and text[space_end] in {" ", "\t"}:
+                    space_end += 1
+                if space_end > space_start:
+                    trailing_sep = text[space_start:space_end]
+                    i = space_end - 1
 
-                    # 如果左右没有冒号，再检查空格的特殊情况
-                    if can_split and char == " " and i > 0 and i < len(text) - 1:
-                        prev_char = text[i - 1]
-                        next_char = text[i + 1]
-                        dash_chars = {"-", "—"}
-                        if prev_char in dash_chars or next_char in dash_chars:
-                            can_split = False
-                        else:
-                            # 不分割数字和数字、数字和英文、英文和数字、英文和英文之间的空格
-                            prev_is_alnum = prev_char.isdigit() or is_english_letter(prev_char)
-                            next_is_alnum = next_char.isdigit() or is_english_letter(next_char)
-                            if prev_is_alnum and next_is_alnum:
-                                can_split = False
-
+            segments.append((current_segment, trailing_sep))
+            current_segment = ""
+        elif char in _DISCARD_SEPARATORS:
+            can_split = not inside_quote[i] and _can_split_on_discard_separator(text, i)
             if can_split:
-                # 只有当当前段不为空时才添加
                 if current_segment:
                     segments.append((current_segment, char))
-                # 如果当前段为空，但分隔符是空格或换行符，则也添加一个空段（保留分隔符）
                 elif char in {" ", "\n"}:
                     segments.append(("", char))
                 current_segment = ""
             else:
-                # 不分割，将分隔符加入当前段
                 current_segment += char
         else:
             current_segment += char
         i += 1
 
-    # 添加最后一个段（没有后续分隔符）
     if current_segment:
         segments.append((current_segment, ""))
+    return [(content, sep) for content, sep in segments if content or sep]
 
-    # 过滤掉完全空的段（内容和分隔符都为空）
-    segments = [(content, sep) for content, sep in segments if content or sep]
 
-    # 如果分割后为空（例如，输入全是分隔符且不满足保留条件），恢复颜文字并返回
-    # 如果原始文本非空，则返回原始文本（可能只包含未被分割的字符或颜文字占位符）
+def _split_into_sentence_segments(text: str) -> list[tuple[str, str]]:
+    """将文本分割成 (句子, 尾随分隔符) 元组，并按段长和句界控制合并概率。"""
+    text = re.sub(r"\n\s*\n+", "\n", text)
+    text = re.sub(r"\n\s*([，,。;；\s])", r"\n\1", text)
+    text = re.sub(r"([，,。;；\s])\s*\n", r"\1\n", text)
+
+    if len(text) < 3:
+        if random.random() < 0.01:
+            return [(char, "") for char in text]
+        return [(text, "")]
+
+    inside_quote = _compute_inside_quote_mask(text)
+    segments = _collect_raw_sentence_segments(text, inside_quote)
     if not segments:
         return [(text, "")] if text else []
 
-    # 2. 概率合并
-    if len_text < 12:
-        split_strength = 0.2
-    elif len_text < 32:
-        split_strength = 0.6
-    else:
-        split_strength = 0.7
-    # 合并概率与分割强度相反
-    merge_probability = 1.0 - split_strength
+    segments = _collapse_spaced_single_chars(segments)
+    total_segments = len(segments)
 
-    merged_segments = []
+    merged_segments: list[tuple[str, str]] = []
     idx = 0
-    while idx < len(segments):
+    while idx < total_segments:
         current_content, current_sep = segments[idx]
-
-        # 检查是否可以与下一段合并
-        # 条件：不是最后一段，且随机数小于合并概率，且当前段有内容（避免合并空段）
-        if idx + 1 < len(segments) and current_content and current_sep != "\n" and random.random() < merge_probability:
+        if idx + 1 < total_segments and current_content:
             next_content, next_sep = segments[idx + 1]
-            # 合并: (内容1 + 分隔符1 + 内容2, 分隔符2)
-            # 只有当下一段也有内容时才合并文本，否则只传递分隔符
-            if next_content:
-                merged_content = current_content + current_sep + next_content
-                merged_segments.append((merged_content, next_sep))
-            else:  # 下一段内容为空，只保留当前内容和下一段的分隔符
-                merged_segments.append((current_content, next_sep))
+            merge_prob = _compute_merge_probability(current_content, current_sep, next_content, total_segments)
+            if merge_prob > 0.0 and random.random() < merge_prob:
+                if next_content:
+                    merged_segments.append((current_content + current_sep + next_content, next_sep))
+                else:
+                    merged_segments.append((current_content, next_sep))
+                idx += 2
+                continue
+        merged_segments.append((current_content, current_sep))
+        idx += 1
 
-            idx += 2  # 跳过下一段，因为它已被合并
-        else:
-            # 不合并，直接添加当前段
-            merged_segments.append((current_content, current_sep))
-            idx += 1
-
-    # 提取最终的句子内容（保留尾随分隔符，供压缩拼接时恢复停顿）
-    sentence_segments = [(content, sep) for content, sep in merged_segments if content]  # 只保留有内容的段
-
-    # 清理可能引入的空字符串和仅包含空白的字符串
-    sentence_segments = [
-        (sentence, sep) for sentence, sep in sentence_segments if sentence.strip()
-    ]  # 过滤掉空字符串以及仅包含空白（如换行符、空格）的字符串
+    sentence_segments = [(content, sep) for content, sep in merged_segments if content and content.strip()]
     sentence_segments = [
         (normalized_sentence, sep)
         for sentence, sep in sentence_segments
@@ -575,66 +658,53 @@ def _apply_response_post_processing(
     return segments
 
 
-def process_llm_response_segments(
+def _prepare_response_text(
     text: str,
-    enable_splitter: bool = True,
-    enable_chinese_typo: bool = True,
-) -> list[ProcessedResponseSegment]:
-    """处理回复文本，并保留错别字纠正消息的引用提示。"""
-
-    if not global_config.response_post_process.enable_response_post_process:
-        return [ProcessedResponseSegment(text)]
-
-    # 先保护颜文字
-    if global_config.response_splitter.enable_kaomoji_protection:
+    *,
+    protect_kaomoji_tokens: bool,
+) -> tuple[str, dict[str, str], Optional[list[ProcessedResponseSegment]]]:
+    """统一执行颜文字保护、中文括号旁白清理与长度上限拦截。"""
+    if protect_kaomoji_tokens and global_config.response_splitter.enable_kaomoji_protection:
         protected_text, kaomoji_mapping = protect_kaomoji(text)
         logger.debug(f"保护颜文字后的文本: {protected_text}")
     else:
         protected_text = text
         kaomoji_mapping = {}
-    # 提取被 () 或 [] 或 （）包裹且包含中文的内容
-    pattern = re.compile(r"[(\[（](?=.*[一-鿿]).*?[)\]）]")
-    _extracted_contents = pattern.findall(protected_text)  # 在保护后的文本上查找
-    # 去除 () 和 [] 及其包裹的内容
-    cleaned_text = pattern.sub("", protected_text)
 
+    cleaned_text = _CHINESE_BRACKET_PATTERN.sub("", protected_text)
     if cleaned_text == "":
-        return [ProcessedResponseSegment("呃呃")]
+        return "", kaomoji_mapping, [ProcessedResponseSegment("呃呃")]
 
     logger.debug(f"{text}去除括号处理后的文本: {cleaned_text}")
 
-    # 对清理后的文本进行进一步处理
     max_length = global_config.response_splitter.max_length * 2
-    max_sentence_num = global_config.response_splitter.max_sentence_num
-    max_split_num = global_config.response_splitter.max_split_num
-    # 如果基本上是中文，则进行长度过滤
     if get_western_ratio(cleaned_text) < 0.1 and len(cleaned_text) > max_length:
         logger.warning(f"回复过长 ({len(cleaned_text)} 字符)，返回默认回复")
-        return [ProcessedResponseSegment(_get_random_default_reply())]
+        return cleaned_text, kaomoji_mapping, [ProcessedResponseSegment(_get_random_default_reply())]
 
-    if global_config.response_splitter.enable and enable_splitter:
-        split_sentences = _split_into_sentence_segments(cleaned_text)
-    else:
-        split_sentences = [(cleaned_text, "")]
+    return cleaned_text, kaomoji_mapping, None
 
+
+def _apply_post_processing_and_limits(
+    split_sentences: list[tuple[str, str]],
+    enable_chinese_typo: bool,
+    kaomoji_mapping: dict[str, str],
+) -> list[ProcessedResponseSegment]:
+    """执行错别字注入、句数超限处理、最大条数合并与颜文字恢复。"""
     segments = _apply_response_post_processing(split_sentences, enable_chinese_typo)
+    max_sentence_num = global_config.response_splitter.max_sentence_num
+    max_split_num = global_config.response_splitter.max_split_num
 
     if len(segments) > max_sentence_num:
         if global_config.response_splitter.enable_overflow_return_all:
-            logger.warning(f"分割后消息数量过多 ({len(segments)} 条)，直接返回原文")
-            segments = [ProcessedResponseSegment(cleaned_text)]
+            logger.warning(f"分割后消息数量过多 ({len(segments)} 条)，按最大分割条数合并发送")
         else:
             logger.warning(f"分割后消息数量过多 ({len(segments)} 条)，返回默认回复")
             return [ProcessedResponseSegment(_get_random_default_reply())]
 
     segments = _merge_processed_segments_to_max_count(segments, max_split_num)
 
-    # if extracted_contents:
-    #     for content in extracted_contents:
-    #         sentences.append(content)
-
-    # 在所有句子处理完毕后，对包含占位符的列表进行恢复
-    if global_config.response_splitter.enable_kaomoji_protection:
+    if kaomoji_mapping:
         recovered_sentences = recover_kaomoji([segment.text for segment in segments], kaomoji_mapping)
         segments = [
             ProcessedResponseSegment(
@@ -649,12 +719,34 @@ def process_llm_response_segments(
     return segments
 
 
+def process_llm_response_segments(
+    text: str,
+    enable_splitter: bool = True,
+    enable_chinese_typo: bool = True,
+) -> list[ProcessedResponseSegment]:
+    """处理回复文本，并保留错别字纠正消息的引用提示。"""
+
+    if not global_config.response_post_process.enable_response_post_process:
+        return [ProcessedResponseSegment(text)]
+
+    cleaned_text, kaomoji_mapping, early_return = _prepare_response_text(text, protect_kaomoji_tokens=True)
+    if early_return is not None:
+        return early_return
+
+    if global_config.response_splitter.enable and enable_splitter:
+        split_sentences = _split_into_sentence_segments(cleaned_text)
+    else:
+        split_sentences = [(cleaned_text, "")]
+
+    return _apply_post_processing_and_limits(split_sentences, enable_chinese_typo, kaomoji_mapping)
+
+
 async def process_llm_response_segments_async(
     text: str,
     enable_splitter: bool = True,
     enable_chinese_typo: bool = True,
 ) -> list[ProcessedResponseSegment]:
-    """异步处理回复文本，支持使用 LLM 按语义断句。"""
+    """异步处理回复文本，支持使用 LLM 按语义断句，失败时回退规则断句。"""
     if global_config.response_splitter.mode != "llm":
         return await asyncio.to_thread(process_llm_response_segments, text, enable_splitter, enable_chinese_typo)
 
@@ -665,20 +757,18 @@ async def process_llm_response_segments_async(
     ):
         return await asyncio.to_thread(process_llm_response_segments, text, enable_splitter, enable_chinese_typo)
 
+    cleaned_text, _mapping, early_return = _prepare_response_text(text, protect_kaomoji_tokens=False)
+    if early_return is not None:
+        return early_return
+
     try:
-        split_sentences = await split_text_with_llm(text)
+        split_sentences = await split_text_with_llm(cleaned_text)
     except Exception as exc:
-        logger.warning(f"LLM 断句失败，本次回复不断句：{exc}")
-        split_sentences = [(text, "")]
+        logger.warning(f"LLM 断句失败，回退规则断句：{exc}")
+        return await asyncio.to_thread(process_llm_response_segments, text, enable_splitter, enable_chinese_typo)
 
     # 数据首次加载和错别字计算交给线程执行，避免占住聊天事件循环。
-    segments = await asyncio.to_thread(_apply_response_post_processing, split_sentences, enable_chinese_typo)
-    max_sentence_num = global_config.response_splitter.max_sentence_num
-    if len(segments) > max_sentence_num:
-        if global_config.response_splitter.enable_overflow_return_all:
-            return [ProcessedResponseSegment(text)]
-        return [ProcessedResponseSegment(_get_random_default_reply())]
-    return _merge_processed_segments_to_max_count(segments, global_config.response_splitter.max_split_num)
+    return await asyncio.to_thread(_apply_post_processing_and_limits, split_sentences, enable_chinese_typo, {})
 
 
 def process_llm_response(text: str, enable_splitter: bool = True, enable_chinese_typo: bool = True) -> list[str]:

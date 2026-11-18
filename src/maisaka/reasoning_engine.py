@@ -63,6 +63,7 @@ from src.maisaka.visual.chat_history_refresher import (
 )
 from src.maisaka.builtin_tool.context import BuiltinToolRuntimeContext
 from src.maisaka.builtin_tool.reply import execute_reply
+from src.maisaka.builtin_tool.send_emoji import handle_tool as execute_send_emoji
 from src.maisaka.context.messages import (
     ComplexSessionMessage,
     LLMContextMessage,
@@ -298,6 +299,8 @@ class MaisakaReasoningEngine:
             try:
                 return await heuristic_memory_injector.build_injection_message(
                     session_id=str(self._runtime.session_id or ""),
+                    anchor_message=profile_message,
+                    source_messages=source_messages,
                 )
             except Exception as exc:
                 logger.debug(f"{self._runtime.log_prefix} 启发式记忆自然拉起失败，已跳过: {exc}")
@@ -503,8 +506,10 @@ class MaisakaReasoningEngine:
         ended_at = time.time()
         cycle_detail.time_records["replyer"] = ended_at - started_at
         summary = result.get_history_content()
-        state.direct_reply_sent = result.success or any(
-            receipt["success"] for receipt in result.metadata.get("send_results", [])
+        abstained = bool(result.metadata.get("abstained"))
+        state.direct_reply_sent = (not abstained) and (
+            result.success
+            or any(receipt["success"] for receipt in result.metadata.get("send_results", []))
         )
         if not result.success and state.direct_reply_sent:
             summary = f"部分消息已发送，本轮不再重试。{summary}"
@@ -525,11 +530,73 @@ class MaisakaReasoningEngine:
                 "detail": normalize_tool_record_value(result.metadata.get("monitor_detail")),
             }
         ]
-        if result.success:
+        if abstained:
+            state.cycle_end = CycleEnd("planner_reply_abstained", "Replyer 静默弃权，已结束本轮思考。")
+        elif result.success:
             state.cycle_end = CycleEnd("planner_reply_end", "回复完成，已结束本轮思考。")
         else:
             logger.error(f"{self._runtime.log_prefix} Planner 正文触发回复失败：{summary}")
             state.cycle_end = CycleEnd("planner_reply_failed", f"回复失败，已结束本轮思考：{summary}")
+
+    async def _send_emoji_without_tool_call(
+        self,
+        cycle_detail: CycleDetail,
+        state: CycleRuntimeState,
+        *,
+        reasoning: str = "",
+        append: bool = False,
+    ) -> bool:
+        """在插件回复判定路径下直接复用 send_emoji 选图并发送表情包。"""
+
+        started_at = time.time()
+        execution_id = uuid.uuid4().hex
+        target = state.reply_target_message
+        arguments: dict[str, Any] = {
+            "msg_id": target.message_id if target is not None else "",
+        }
+        self._runtime._update_stage_status("Emoji", "插件表情包判定")
+        tool_ctx = BuiltinToolRuntimeContext(self, self._runtime)
+        invocation = ToolInvocation(
+            tool_name="send_emoji",
+            arguments=arguments,
+            call_id=execution_id,
+            session_id=self._runtime.session_id,
+            stream_id=self._runtime.session_id,
+            reasoning=reasoning,
+        )
+        try:
+            result = await execute_send_emoji(tool_ctx, invocation)
+        except Exception as exc:
+            logger.exception(f"{self._runtime.log_prefix} 插件触发发送表情包异常")
+            result = tool_ctx.build_failure_result("send_emoji", f"表情包执行异常：{type(exc).__name__}: {exc}")
+        ended_at = time.time()
+        cycle_detail.time_records["send_emoji"] = ended_at - started_at
+        summary = result.get_history_content()
+        monitor_entry = {
+            "tool_call_id": execution_id,
+            "tool_name": "send_emoji",
+            "tool_args": arguments,
+            "tool_call_source": "turn_decision",
+            "tool_call_source_label": "插件回复判定",
+            "success": result.success,
+            "summary": summary,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "duration_ms": (ended_at - started_at) * 1000,
+            "detail": normalize_tool_record_value(result.metadata.get("monitor_detail")),
+        }
+        if append:
+            state.tool_result_summaries = [*state.tool_result_summaries, summary]
+            state.tool_monitor_results = [*state.tool_monitor_results, monitor_entry]
+        else:
+            state.direct_reply_sent = result.success
+            state.tool_result_summaries = [summary]
+            state.tool_monitor_results = [monitor_entry]
+            if result.success:
+                state.cycle_end = CycleEnd("planner_reply_end", "表情包发送完成，已结束本轮思考。")
+            else:
+                state.cycle_end = CycleEnd("planner_reply_failed", f"表情包发送失败：{summary}")
+        return result.success
 
     async def _emit_planner_progress(
         self,

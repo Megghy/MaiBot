@@ -204,9 +204,17 @@ async def _build_emoji_candidate_message(emojis: list[MaiEmoji]) -> InternalCont
 
     image_bytes_list = await asyncio.gather(*[_load_emoji_bytes(emoji) for emoji in emojis])
     merged_image_bytes = await asyncio.to_thread(_merge_emoji_tiles, list(image_bytes_list))
+    description_lines = [
+        f"#{index}: {emoji.description.strip()}"
+        for index, emoji in enumerate(emojis, start=1)
+        if emoji.description and emoji.description.strip()
+    ]
+    prompt_text = "请从这张 5x5 拼图中选择一个序号。"
+    if description_lines:
+        prompt_text = f"{prompt_text}\n候选表情包描述参考：\n" + "\n".join(description_lines)
     raw_message = MessageSequence(
         [
-            TextComponent("请从这张 5x5 拼图中选择一个序号。"),
+            TextComponent(prompt_text),
             ImageComponent(binary_hash="", binary_data=merged_image_bytes),
         ]
     )

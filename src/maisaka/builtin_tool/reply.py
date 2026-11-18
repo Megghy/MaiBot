@@ -558,6 +558,21 @@ async def execute_reply(
 
     reply_text = reply_result.completion.response_text.strip() if success else ""
 
+    if reply_text.upper() in {"[PASS]", "PASS"}:
+        reply_result.monitor_detail = build_reply_monitor_detail(reply_result)
+        reply_metadata = _build_monitor_metadata(reply_result, extension_execution.reply_id)
+        reply_metadata["abstained"] = True
+        reply_metadata["send_results"] = []
+        logger.info(
+            f"{tool_ctx.runtime.log_prefix} 回复生成器主动弃权 ([PASS]): 目标消息编号={target_message_id}"
+        )
+        return tool_ctx.build_success_result(
+            "reply",
+            "Replyer 判定本条无需强行接话，已静默跳过。",
+            structured_content={"abstained": True, "send_results": []},
+            metadata=reply_metadata,
+        )
+
     if not reply_text:
         reply_result.monitor_detail = build_reply_monitor_detail(reply_result)
         reply_metadata = _build_monitor_metadata(reply_result, extension_execution.reply_id)

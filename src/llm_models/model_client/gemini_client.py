@@ -569,6 +569,21 @@ def _process_stream_chunk(
     tool_calls_buffer.extend(_collect_function_calls(chunk))
 
 
+GEMINI_PROXY_BLOCKED_TEXT_MARKERS = (
+    "Request is blocked due to the account restrictions",
+    "Prohibited Use Policy (PUP) violations",
+    "aistudio.google.com/docs/troubleshooting",
+)
+
+
+def _raise_if_proxy_blocked_text(content: str | None) -> None:
+    """拦截中转网关将上游 AI Studio 账号风控报错伪装成 HTTP 200 正文返回的情况。"""
+    if not content:
+        return
+    if any(marker in content for marker in GEMINI_PROXY_BLOCKED_TEXT_MARKERS):
+        raise RespNotOkException(403, f"Gemini 代理返回上游账号风控拦截文本: {content[:160]}")
+
+
 def _build_stream_api_response(
     content_buffer: io.StringIO,
     reasoning_buffer: io.StringIO,
@@ -596,6 +611,7 @@ def _build_stream_api_response(
     reasoning_buffer.close()
 
     _warn_if_max_tokens_truncated(last_response, content or None, tool_calls_buffer or None)
+    _raise_if_proxy_blocked_text(content)
     if not content and not tool_calls_buffer and not reasoning_content:
         raise EmptyResponseException(last_response)
     context_tool_calls = [
@@ -701,6 +717,7 @@ def _default_normal_response_parser(
 
     usage_record = _extract_usage_record(response)
     _warn_if_max_tokens_truncated(response, content, tool_calls or None)
+    _raise_if_proxy_blocked_text(content)
     if not content and not tool_calls and not reasoning_content:
         raise EmptyResponseException(response, "响应中既无文本内容也无工具调用")
     context_tool_calls = [
@@ -1157,7 +1174,7 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
             )
             wrapped_error = (
                 exc
-                if isinstance(exc, (EmptyResponseException, RespParseException))
+                if isinstance(exc, (EmptyResponseException, RespParseException, RespNotOkException))
                 else NetworkConnectionError(str(exc))
             )
             attach_request_snapshot(wrapped_error, snapshot_path)
@@ -1238,7 +1255,7 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
             )
             wrapped_error = (
                 exc
-                if isinstance(exc, (EmptyResponseException, RespParseException))
+                if isinstance(exc, (EmptyResponseException, RespParseException, RespNotOkException))
                 else NetworkConnectionError(str(exc))
             )
             attach_request_snapshot(wrapped_error, snapshot_path)
@@ -1379,7 +1396,7 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
             )
             wrapped_error = (
                 exc
-                if isinstance(exc, (EmptyResponseException, RespParseException))
+                if isinstance(exc, (EmptyResponseException, RespParseException, RespNotOkException))
                 else NetworkConnectionError(str(exc))
             )
             attach_request_snapshot(wrapped_error, snapshot_path)

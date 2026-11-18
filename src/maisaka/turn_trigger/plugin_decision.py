@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from collections import OrderedDict
 import io
@@ -25,7 +26,11 @@ from src.config.config import global_config
 from src.maisaka.context.history import build_session_message_visible_text
 from src.maisaka.context.messages import SessionBackedMessage
 from src.maisaka.monitor.events import emit_turn_decision
-from src.maisaka.visual.chat_history_refresher import _refresh_pending_visual_components
+from src.maisaka.visual.chat_history_refresher import (
+    _has_pending_image_component,
+    _is_vlm_task_configured,
+    _refresh_pending_visual_components,
+)
 from src.plugin_runtime.host.hook_spec_registry import HookSpec
 from src.plugin_runtime.host.message_utils import PluginMessageUtils
 from src.plugin_runtime.integration import get_plugin_runtime_manager
@@ -39,13 +44,40 @@ HOOK_NAME = "maisaka.turn.decide"
 IMAGE_PROCESSING_PLACEHOLDER = "[图片，识别中.....]"
 logger = get_logger("maisaka_turn_scheduler")
 PRIVATE_DIRECT_REPLY_REFERENCE = (
-    "按语境自然简短回应: 日常提问或聊正事就直接接话解答; "
-    "若对方在挑衅找茬或对喷, 看对方火力直接回敬一句, 戳穿痛处就行, 别太过分; "
-    "若对方在抱怨别人, 分享遭遇, 搬运言论或冒抽象/种草念头, 用冷淡刁钻的角度简短阴阳一句(先作废第一反应的平庸槽点): "
-    "对方吐槽外人时别当捧哏陪骂, 掉转准星点破说话人自己在里面的尴尬处境, 地位盲点或隐瞒的事实; "
-    "对方自己种草智商税或冒抽象念头时, 顺着该设定冷静推导出一个荒谬后果; "
-    "点到即止, 不做低级人身攻击或诅咒, 不用'……是吧/挽尊/笑死'等套话."
+    "日常闲聊像熟人朋友随口打字一样简短干脆(单句2~10字, 或用空格/逗号分1~2个短句), "
+    "不把对方原话总结成旁白, 不硬造复杂比喻; "
+    "若遇正经问题咨询(含梗/笑点解析)或对线反击需展开说明时, 放开字数限制直接把结论与理由说透."
 )
+JEV_IMAGE_RECOGNITION_WAIT_TIMEOUT_SECONDS = 6.5
+JEV_IMAGE_RECOGNITION_POLL_INTERVAL_SECONDS = 0.25
+
+
+def _has_pending_emoji_component(components: list[object]) -> bool:
+    for component in components:
+        if isinstance(component, EmojiComponent):
+            content = component.content.strip()
+            if (not content or content == "[表情包]") and component.binary_hash and component.binary_data:
+                return True
+    return False
+
+
+async def _wait_for_pending_visual_components(messages: list[SessionMessage]) -> None:
+    if not _is_vlm_task_configured():
+        return
+    deadline = time.monotonic() + JEV_IMAGE_RECOGNITION_WAIT_TIMEOUT_SECONDS
+    while True:
+        still_pending = False
+        for message in messages:
+            raw_message = getattr(message, "raw_message", None)
+            components = getattr(raw_message, "components", None) or []
+            if not components:
+                continue
+            await asyncio.to_thread(_refresh_pending_visual_components, components)
+            if _has_pending_image_component(components) or _has_pending_emoji_component(components):
+                still_pending = True
+        if not still_pending or time.monotonic() >= deadline:
+            return
+        await asyncio.sleep(JEV_IMAGE_RECOGNITION_POLL_INTERVAL_SECONDS)
 
 
 class TurnDecision(BaseModel):
@@ -223,7 +255,7 @@ def _extract_clean_image_summary(raw_content: str) -> str:
     elif text.startswith("[图片:") and text.endswith("]"):
         text = text[4:-1].strip()
     text = " ".join(text.split())
-    return text[:120]
+    return text[:260]
 
 
 def _format_jev_image_tag(asset_key: str | None, raw_content: str) -> str:
@@ -433,6 +465,7 @@ class PluginTurnDecision:
         started_at = time.perf_counter()
         runtime._update_stage_status("回复判定", f"正在评估 {len(messages)} 条消息")
         try:
+            await _wait_for_pending_visual_components(messages)
             result = await get_plugin_runtime_manager().invoke_hook(
                 HOOK_NAME, request=build_turn_request(runtime, messages), result=TurnDecision().model_dump()
             )
@@ -541,6 +574,14 @@ async def reply_from_decision(
             deferred_tools_reminder="",
             round_text=round_text,
         )
+        emoji_mode = str(decision.metadata.get("emoji") or "none").strip()
+        if emoji_mode == "emoji_only":
+            return await engine._send_emoji_without_tool_call(
+                cycle,
+                state,
+                reasoning=decision.detail,
+                append=False,
+            )
         await engine._reply_without_tool_call(
             decision.reply_reference,
             cycle,
@@ -549,6 +590,13 @@ async def reply_from_decision(
             extra_info="\n\n".join(item for item in memory if item.strip()),
             context_message_ids=decision.context_message_ids,
         )
+        if emoji_mode == "with_text" and state.direct_reply_sent:
+            await engine._send_emoji_without_tool_call(
+                cycle,
+                state,
+                reasoning=decision.detail,
+                append=True,
+            )
         return state.direct_reply_sent
     except BaseException:
         state.cycle_end = CycleEnd("turn_decision_error", "插件直接回复失败或取消。")

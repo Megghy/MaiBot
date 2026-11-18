@@ -1,4 +1,6 @@
+from datetime import datetime
 from enum import Enum
+from typing import Optional
 
 import hashlib
 import time
@@ -45,6 +47,48 @@ def number_to_short_id(original_id: int, salt: str, length: int = 6) -> str:
         temp_num //= base
 
     return short_id
+
+
+_WEEKDAY_ZH = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
+_WEEKDAY_SHORT_ZH = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def _resolve_time_period_zh(dt: datetime) -> str:
+    minute_of_day = dt.hour * 60 + dt.minute
+    if minute_of_day < 5 * 60:
+        return "凌晨"
+    if minute_of_day < 8 * 60:
+        return "早上"
+    if minute_of_day < 11 * 60 + 30:
+        return "上午"
+    if minute_of_day < 13 * 60 + 30:
+        return "中午"
+    if minute_of_day < 17 * 60:
+        return "下午"
+    if minute_of_day < 19 * 60:
+        return "傍晚"
+    if minute_of_day < 23 * 60:
+        return "晚上"
+    return "深夜"
+
+
+def format_prompt_datetime(dt: Optional[datetime] = None) -> str:
+    """将时间格式化为带星期与时段的提示词时间文本。"""
+
+    target = dt or datetime.now()
+    weekday = _WEEKDAY_ZH[target.weekday()]
+    period = _resolve_time_period_zh(target)
+    return f"{target.strftime('%Y-%m-%d %H:%M:%S')}（{weekday}，{period}）"
+
+
+def format_prompt_short_datetime(timestamp: float) -> str:
+    """将时间戳格式化为带短星期的紧凑历史时间标签。"""
+
+    if timestamp <= 0:
+        return ""
+    target = datetime.fromtimestamp(timestamp)
+    weekday_short = _WEEKDAY_SHORT_ZH[target.weekday()]
+    return f"{target.strftime('%m-%d')} {weekday_short} {target.strftime('%H:%M')}"
 
 
 def translate_timestamp_to_human_readable(timestamp: float, mode: TimestampMode | str) -> str:

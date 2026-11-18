@@ -274,3 +274,51 @@ def test_encode_jev_image_asset_enforces_typesafe_dimension_bounds():
     assert decisions._format_jev_image_tag("img_1", "[图片，识别中.....]") == "[图片: img_1]"
     assert decisions._format_jev_image_tag("img_1", "[图片：金黄厚切炸猪排]") == "[图片: img_1 | 金黄厚切炸猪排]"
     assert decisions._format_jev_image_tag(None, "[图片：金黄厚切炸猪排]") == "[图片: 金黄厚切炸猪排]"
+
+
+@pytest.mark.asyncio
+async def test_reply_from_decision_dispatches_emoji_only_and_with_text():
+    target = SimpleNamespace(message_id="m-1")
+
+    async def fake_reply(reference, cycle, state, **kwargs):
+        state.direct_reply_sent = True
+
+    engine = SimpleNamespace(
+        _start_cycle_round=AsyncMock(return_value=(SimpleNamespace(), "round-0")),
+        _refresh_visual_placeholders_for_cycle=AsyncMock(),
+        _post_process_chat_history_after_cycle=AsyncMock(),
+        _build_planner_injected_user_messages=AsyncMock(return_value=[]),
+        _reply_without_tool_call=AsyncMock(side_effect=fake_reply),
+        _send_emoji_without_tool_call=AsyncMock(return_value=True),
+        _finalize_cycle=AsyncMock(),
+    )
+    runtime = SimpleNamespace(
+        _reasoning_engine=engine,
+        _enter_running_state=Mock(),
+        _enter_stop_state=Mock(),
+        _update_stage_status=Mock(),
+    )
+
+    emoji_only_decision = decisions.TurnDecision(
+        action="reply",
+        message_id="m-1",
+        reply_reference="respond",
+        detail="Jev reply emoji=emoji_only",
+        metadata={"emoji": "emoji_only"},
+    )
+    assert await decisions.reply_from_decision(runtime, emoji_only_decision, [target], target)
+    engine._send_emoji_without_tool_call.assert_awaited_once()
+    engine._reply_without_tool_call.assert_not_awaited()
+
+    engine._send_emoji_without_tool_call.reset_mock()
+    with_text_decision = decisions.TurnDecision(
+        action="reply",
+        message_id="m-1",
+        reply_reference="respond",
+        detail="Jev reply emoji=with_text",
+        metadata={"emoji": "with_text"},
+    )
+    assert await decisions.reply_from_decision(runtime, with_text_decision, [target], target)
+    engine._reply_without_tool_call.assert_awaited_once()
+    engine._send_emoji_without_tool_call.assert_awaited_once()
+    assert engine._send_emoji_without_tool_call.await_args.kwargs["append"] is True

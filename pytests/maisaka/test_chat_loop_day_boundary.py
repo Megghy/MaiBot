@@ -121,7 +121,7 @@ def test_day_boundary_is_deferred_until_after_tool_result() -> None:
         UserMessageItem,
     ]
     assert messages[3].call_id == "call_emoji"
-    assert get_item_text(messages[4]) == "时间：2026-07-21 00:00:01"
+    assert get_item_text(messages[4]) == "时间：2026-07-21 00:00:01（星期二，凌晨）"
     assert get_item_text(messages[5]) == "[参考消息]\n工具后的普通消息"
 
 
@@ -165,7 +165,7 @@ def test_day_boundary_is_deferred_until_after_all_tool_results() -> None:
         UserMessageItem,
     ]
     assert [message.call_id for message in messages[4:6]] == ["call_first", "call_second"]
-    assert get_item_text(messages[6]) == "时间：2026-07-21 00:00:01"
+    assert get_item_text(messages[6]) == "时间：2026-07-21 00:00:01（星期二，凌晨）"
 
 
 def test_day_boundary_stays_before_regular_context_message() -> None:
@@ -185,7 +185,7 @@ def test_day_boundary_stays_before_regular_context_message() -> None:
     messages = _build_history_messages(history)
 
     assert [message.role for message in messages] == [RoleType.User, RoleType.User, RoleType.User]
-    assert get_item_text(messages[1]) == "时间：2026-07-21 00:00:01"
+    assert get_item_text(messages[1]) == "时间：2026-07-21 00:00:01（星期二，凌晨）"
     assert get_item_text(messages[2]) == "[参考消息]\n跨日后消息"
 
 

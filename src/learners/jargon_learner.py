@@ -291,38 +291,39 @@ class JargonLearner:
                 raise
             return False
 
-        jargon_entries = parse_jargon_response(response)
-        cached_jargon_entries = self._check_cached_jargons_in_messages(source_items, jargon_miner)
-        if cached_jargon_entries:
-            existing_contents = {content for content, _ in jargon_entries}
-            for content, source_id in cached_jargon_entries:
-                if content in existing_contents:
-                    continue
-                jargon_entries.append((content, source_id))
-                existing_contents.add(content)
-                logger.info(f"从缓存中找到黑话: {content}")
-
-        if not jargon_entries:
-            logger.info("没有可学习的黑话")
-            self.learning_status, self.learning_detail = "no_results", "模型未提取出黑话候选，已有黑话缓存也未命中"
-            self._log_jargon_update_process(
-                status="no_extracted_entries",
-                jargon_miner=jargon_miner,
-                source_items=source_items,
-                parsed_entries=[],
-                accepted_entries=[],
-                skipped_entries=[],
-                saved=0,
-                updated=0,
-            )
-            return False
-
         original_jargon_session_id = jargon_miner.session_id
         original_jargon_session_name = jargon_miner.session_name
         if learning_session_id != original_jargon_session_id:
             jargon_miner.session_id = learning_session_id
             jargon_miner.session_name = self._get_session_display_name(learning_session_id)
         try:
+            jargon_entries = parse_jargon_response(response)
+            cached_jargon_entries = self._check_cached_jargons_in_messages(source_items, jargon_miner)
+            if cached_jargon_entries:
+                existing_pairs = {(content.strip().lower(), source_id.strip()) for content, source_id in jargon_entries}
+                for content, source_id in cached_jargon_entries:
+                    pair_key = (content.strip().lower(), source_id.strip())
+                    if pair_key in existing_pairs:
+                        continue
+                    jargon_entries.append((content, source_id))
+                    existing_pairs.add(pair_key)
+                    logger.info(f"从缓存中找到黑话: {content} (source_id={source_id})")
+
+            if not jargon_entries:
+                logger.info("没有可学习的黑话")
+                self.learning_status, self.learning_detail = "no_results", "模型未提取出黑话候选，已有黑话缓存也未命中"
+                self._log_jargon_update_process(
+                    status="no_extracted_entries",
+                    jargon_miner=jargon_miner,
+                    source_items=source_items,
+                    parsed_entries=[],
+                    accepted_entries=[],
+                    skipped_entries=[],
+                    saved=0,
+                    updated=0,
+                )
+                return False
+
             return await self._process_jargon_entries(
                 jargon_entries, source_items, jargon_miner, learned_contents=learned_contents
             )

@@ -1,5 +1,4 @@
 from dataclasses import dataclass, field, replace
-from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import asyncio
@@ -27,6 +26,7 @@ from src.common.data_models.reply_generation_data_models import (
 )
 from src.common.i18n import get_locale
 from src.common.logger import get_logger
+from src.common.utils.math_utils import format_prompt_datetime
 from src.common.utils.utils_config import ChatConfigUtils
 from src.config.config import global_config
 from src.maisaka.context.message_id_alias import to_display_message_id
@@ -581,8 +581,7 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         keywords_reaction_prompt: str = "",
         reply_tool_args: Optional[Dict[str, Any]] = None,
     ) -> str:
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        sections: List[str] = [f"当前时间：{current_time}"]
+        sections: List[str] = [f"当前时间：{format_prompt_datetime()}"]
         target_message_block = self._build_target_message_block(reply_message)
         if target_message_block:
             sections.append(target_message_block)

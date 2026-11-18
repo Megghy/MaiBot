@@ -15,6 +15,7 @@ from src.common.data_models.message_component_data_model import AtComponent
 from src.common.i18n import get_locale
 from src.common.logger import get_logger
 from src.common.prompt_i18n import load_prompt
+from src.common.utils.math_utils import format_prompt_datetime
 from src.common.utils.utils_config import ChatConfigUtils
 from src.common.utils.system_utils import is_bot_self
 from src.config.config import global_config
@@ -838,7 +839,7 @@ class MaisakaChatLoopService:
     def _build_time_user_message(timestamp: datetime) -> str:
         """构建统一格式的时间提示消息。"""
 
-        return f"时间：{timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
+        return f"时间：{format_prompt_datetime(timestamp)}"
 
     @staticmethod
     def _build_current_time_user_message() -> str:
