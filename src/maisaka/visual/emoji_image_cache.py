@@ -10,20 +10,27 @@ import base64
 import sys
 import threading
 
+from src.common.utils.utils_image import ImageUtils
 from src.llm_models.payload_content.context_item import ContextImagePart, SUPPORTED_IMAGE_FORMATS
 
 EMOJI_MAX_SIDE = 256
 EMOJI_CACHE_MAX_BYTES = 32 * 1024 * 1024
 EMOJI_CACHE_MAX_ENTRIES = 512
-_ENCODING_VERSION = 1
+_ENCODING_VERSION = 2
 CacheKey = Tuple[str, int, int]
 
 
 def _prepare_emoji_image(image_bytes: bytes) -> ContextImagePart:
-    """小图保持原样；大图取首帧、摆正方向并等比例缩小，保留透明度。"""
+    """小静态图保持原样；动图抽关键帧横向拼接，其余取首帧并等比例缩小。"""
     with Image.open(BytesIO(image_bytes)) as image:
         image_format = image.format.lower() if image.format else ""
-        if max(image.size) <= EMOJI_MAX_SIDE and image_format in SUPPORTED_IMAGE_FORMATS:
+        is_animated = bool(getattr(image, "is_animated", False) or getattr(image, "n_frames", 1) > 1)
+        if is_animated:
+            strip_bytes = ImageUtils.animated_image_to_static_image(
+                image_bytes, max_frames=6, target_height=160
+            )
+            return ContextImagePart("jpeg", base64.b64encode(strip_bytes).decode("ascii"))
+        if max(image.size) <= EMOJI_MAX_SIDE and image_format in SUPPORTED_IMAGE_FORMATS and image_format != "gif":
             return ContextImagePart(image_format, base64.b64encode(image_bytes).decode("ascii"))
 
         image.seek(0)

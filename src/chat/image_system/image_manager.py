@@ -14,6 +14,7 @@ from src.common.database.database import get_db_session
 from src.common.database.database_model import Images, ImageType
 from src.common.logger import get_logger
 from src.common.utils.image_path import resolve_stored_image_path, serialize_stored_image_path
+from src.common.utils.utils_image import ImageUtils
 from src.config.config import config_manager
 from src.prompt.prompt_manager import prompt_manager
 from src.services.llm_service import LLMServiceClient
@@ -500,12 +501,15 @@ class ImageManager:
     async def _generate_image_description(self, image_bytes: bytes, image_format: str) -> str:
         prompt_template = prompt_manager.get_prompt("image_description")
         prompt = await prompt_manager.render_prompt(prompt_template)
-        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+        request_bytes, request_image_format, _ = await asyncio.to_thread(
+            ImageUtils.prepare_image_for_vlm, image_bytes, image_format
+        )
+        image_base64 = base64.b64encode(request_bytes).decode("utf-8")
 
         generation_result = await vlm.generate_response_for_image(
             prompt,
             image_base64,
-            image_format,
+            request_image_format,
         )
         description = generation_result.response
         if not description:

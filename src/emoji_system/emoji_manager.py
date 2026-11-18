@@ -972,8 +972,11 @@ class EmojiManager:
         image_bytes = target_emoji.image_bytes or await asyncio.to_thread(
             target_emoji.read_image_bytes, target_emoji.full_path
         )
-        image_base64 = ImageUtils.image_bytes_to_base64(image_bytes)
         try:
+            image_bytes, image_format, _ = await asyncio.to_thread(
+                ImageUtils.prepare_image_for_vlm, image_bytes, image_format
+            )
+            image_base64 = ImageUtils.image_bytes_to_base64(image_bytes)
             review_prompt_template = prompt_manager.get_prompt("emoji_content_filtration")
             review_prompt = await prompt_manager.render_prompt(review_prompt_template)
             filtration_result = await emoji_manager_vlm.generate_response_for_image(
@@ -1017,17 +1020,16 @@ class EmojiManager:
             target_emoji.read_image_bytes, target_emoji.full_path
         )
         try:
-            request_image_format = image_format
-            if image_format == "gif":
-                try:
-                    image_bytes = await asyncio.to_thread(ImageUtils.gif_2_static_image, image_bytes)
-                except Exception as e:
-                    logger.error(f"[构建描述] 转换 GIF 图片时出错: {e}")
-                    return False, target_emoji
-                request_image_format = "jpg"
+            try:
+                image_bytes, request_image_format, is_animated = await asyncio.to_thread(
+                    ImageUtils.prepare_image_for_vlm, image_bytes, image_format
+                )
+            except Exception as e:
+                logger.error(f"[构建描述] 转换动态图片时出错: {e}")
+                return False, target_emoji
 
             analysis_prompt_template = prompt_manager.get_prompt("emoji_content_analysis")
-            analysis_prompt_template.add_context("image_type", "GIF" if image_format == "gif" else "STATIC")
+            analysis_prompt_template.add_context("image_type", "GIF" if is_animated else "STATIC")
             analysis_prompt = await prompt_manager.render_prompt(analysis_prompt_template)
             image_base64 = ImageUtils.image_bytes_to_base64(image_bytes)
             description_result = await emoji_manager_vlm.generate_response_for_image(

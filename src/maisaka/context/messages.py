@@ -14,6 +14,7 @@ import uuid
 from PIL import Image as PILImage, ImageOps
 
 from src.chat.message_receive.message import SessionMessage
+from src.common.utils.utils_image import ImageUtils
 from src.common.data_models.message_component_data_model import (
     AtComponent,
     DictComponent,
@@ -103,15 +104,23 @@ def _encode_image_for_context(
 ) -> Tuple[str, str]:
     """将图片编码为上下文图片片段可接受的 `(image_format, image_base64)`。
 
-    未启用尺寸限制或尺寸未超限时，受支持的格式直接透传原始字节；其余格式取首帧转码为 JPEG（含透明信息时为 PNG）。
-    超限图片等比例缩小，结果按图片摘要和尺寸限制放入容量为 `TRANSCODED_IMAGE_CACHE_SIZE` 的 LRU 缓存。
+    未启用尺寸限制或尺寸未超限的静态受支持图片直接透传原始字节；动图抽关键帧横向拼接；
+    其余格式取首帧转码为 JPEG（含透明信息时为 PNG）。
     """
-    if image_format in SUPPORTED_IMAGE_FORMATS:
+    is_animated = False
+    image_size: Optional[Tuple[int, int]] = None
+    try:
+        with PILImage.open(BytesIO(image_bytes)) as image:
+            is_animated = bool(getattr(image, "is_animated", False) or getattr(image, "n_frames", 1) > 1)
+            image_size = image.size
+    except Exception:
+        pass
+
+    if not is_animated and image_format in SUPPORTED_IMAGE_FORMATS and image_format != "gif":
         if max_side is None:
             return image_format, base64.b64encode(image_bytes).decode("utf-8")
-        with PILImage.open(BytesIO(image_bytes)) as image:
-            if max(image.size) <= max_side:
-                return image_format, base64.b64encode(image_bytes).decode("utf-8")
+        if image_size is not None and max(image_size) <= max_side:
+            return image_format, base64.b64encode(image_bytes).decode("utf-8")
 
     image_digest = hashlib.sha256(image_bytes).hexdigest()
     cache_key = (image_digest, max_side)
@@ -122,7 +131,13 @@ def _encode_image_for_context(
             _transcoded_image_cache[cache_key] = cached_result
             return cached_result
 
-    transcoded_result = _transcode_first_frame_for_context(image_bytes, max_side)
+    if is_animated:
+        strip_bytes = ImageUtils.animated_image_to_static_image(
+            image_bytes, max_frames=6, target_height=160
+        )
+        transcoded_result = ("jpeg", base64.b64encode(strip_bytes).decode("utf-8"))
+    else:
+        transcoded_result = _transcode_first_frame_for_context(image_bytes, max_side)
     with _transcoded_image_cache_lock:
         _transcoded_image_cache[cache_key] = transcoded_result
         while len(_transcoded_image_cache) > TRANSCODED_IMAGE_CACHE_SIZE:
